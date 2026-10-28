@@ -24,6 +24,7 @@ in-memory SSE responses, so no NVIDIA, Exa, or Cartesia call is made.
 | `source-links.test.js` | Source extraction, title fallback, URL matching (fragments, `www`, tracking params) |
 | `orb-chrome.test.js` | `orbStateFor` precedence and `mainLabelFor` copy for every mic status |
 | `orb-reveal.test.js` | When held audio, MP3, or an error reveals the reply text |
+| `orb-search.test.js` | Searching constellation ranks, scan band sweep/falloff, staggered reveal, dot/alpha gains |
 | `turn-stream.test.js` | `TurnEvent` boundary validation, tool detail/query dispatch, NDJSON event dispatch, typed errors, truncated streams |
 | `omni-stream.test.js` | Streamed model output, truncation/reasoning retries, in-stream busy errors, tool orchestration (correction, round cap, repair with evidence, native ids, duplicate searches, turn deadline, search→fetch, partial failures, cross-round dedupe, tool cancellation) |
 

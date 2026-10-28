@@ -12,6 +12,21 @@ import {
   type OrbState,
 } from '../../lib/orb-state';
 import { mixRgb, rgba, type Rgb } from '../../lib/orb-color';
+import {
+  createSearchRanks,
+  SEARCH_BAND_WIDTH,
+  SEARCH_FX,
+  SEARCH_LIGHT,
+  SEARCH_PHASE_START,
+  SEARCH_WEIGHT_FLOOR,
+  searchAlphaGain,
+  searchBand,
+  searchDotGain,
+  searchHighlight,
+  searchScan,
+  searchToneBucket,
+  type SearchFrame,
+} from '../../lib/orb-search';
 import { useOrbAnimator, type OrbFrame } from '../../lib/use-orb-animator';
 
 const PARTICLE_COUNT = 960;
@@ -28,34 +43,7 @@ const ANGLE_X = 0.32;
  * happens once when the module loads, so the pattern never changes between
  * frames or renders. Ranks keep the reveal ordered from top to bottom.
  */
-const SEARCH_HIGHLIGHT_COUNT = 64;
-/** The constellation arrives in waves, not dot by dot. */
-const SEARCH_LIGHT_BATCHES = 8;
-/** Seconds between waves; the last wave starts after STAGGER * 7. */
-const SEARCH_LIGHT_STAGGER = 0.28;
-/** Seconds a wave takes to fade in, so it never pops. */
-const SEARCH_LIGHT_RISE = 0.42;
-const SEARCH_LIGHT_ALPHA = 0.95;
-const SEARCH_LIGHT_GROW = 0.7;
-const NO_HIGHLIGHT = 0xffff;
-
-const SEARCH_HIGHLIGHT_RANK = (() => {
-  const ranks = new Uint16Array(PARTICLE_COUNT).fill(NO_HIGHLIGHT);
-  const picks: number[] = [];
-  let seed = 0x9e3779b9;
-
-  while (picks.length < SEARCH_HIGHLIGHT_COUNT) {
-    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-    const index = seed % PARTICLE_COUNT;
-    if (!picks.includes(index)) picks.push(index);
-  }
-
-  picks.sort((a, b) => a - b).forEach((index, rank) => {
-    ranks[index] = rank;
-  });
-
-  return ranks;
-})();
+const SEARCH_RANKS = createSearchRanks(PARTICLE_COUNT);
 
 const ERROR_FROM_RGB = hexToRgb(ERROR_COLOR_FROM);
 const ERROR_TO_RGB = hexToRgb(ERROR_COLOR_TO);
@@ -94,7 +82,7 @@ type StateParams = {
 const NEUTRAL_FX = {
   scan: 0,
   scanRate: 0,
-  scanWidth: 0.075,
+  scanWidth: SEARCH_BAND_WIDTH,
   scanBoost: 0,
   scanDim: 1,
   terminator: 0,
@@ -107,7 +95,7 @@ const STATES: Record<OrbState, StateParams> = {
   thinking: { tempo: 1, spin: 0.32, breathe: 0.01, drift: 0, ripple: 0, swell: 0, flow: 0, swirl: 0, pulse: 1, pulseRate: 1, ring: 0, jitter: 0, shake: 0, alpha: 0.78, rest: 0.3, ...NEUTRAL_FX },
   // The Sinua "globe" idea: a scan meridian sweeps the sphere, growing and
   // brightening the dots it crosses while the rest dim back.
-  searching: { tempo: 1, spin: 0.3, breathe: 0.02, drift: 0, ripple: 0, swell: 0.05, flow: 0, swirl: 0, pulse: 0, pulseRate: 1, ring: 0, jitter: 0, shake: 0, alpha: 0.9, rest: 0.12, ...NEUTRAL_FX, scan: 1, scanRate: 0.28, scanWidth: 0.075, scanBoost: 1.4, scanDim: 0.3 },
+  searching: { tempo: 1, spin: 0.3, breathe: 0.02, drift: 0, ripple: 0, swell: 0.05, flow: 0, swirl: 0, pulse: 0, pulseRate: 1, ring: 0, jitter: 0, shake: 0, alpha: 0.9, rest: 0.12, ...NEUTRAL_FX, ...SEARCH_FX },
   speaking: { tempo: 1, spin: 0.24, breathe: 0.01, drift: 0, ripple: 0, swell: 0.06, flow: 1, swirl: 1, pulse: 0, pulseRate: 1, ring: 0, jitter: 0.6, shake: 0, alpha: 0.94, rest: 0.55, ...NEUTRAL_FX },
   // The Sinua "eclipse" idea: a fixed day/night line in view space, driven by
   // a real 0..1 progress value. The sphere keeps spinning under the line.
@@ -183,7 +171,7 @@ export const ParticlesOrb = ({
     pulseClock: 0,
     angleY: 0,
     ringPhase: 0,
-    scanPhase: 0.25,
+    scanPhase: SEARCH_PHASE_START,
     searchElapsed: 0,
     searchLit: false,
   });
@@ -354,7 +342,7 @@ export const ParticlesOrb = ({
       // Start the constellation from zero whenever searching settles in, but
       // never reset while the state is still fading or active: a redraw or a
       // neighbouring state must not restart the reveal.
-      const searching = scanW > 0.002;
+      const searching = scanW > SEARCH_WEIGHT_FLOOR;
       if (searching && !motion.searchLit) {
         motion.searchElapsed = 0;
         motion.searchLit = true;
@@ -363,9 +351,15 @@ export const ParticlesOrb = ({
         motion.searchElapsed = 0;
       }
       if (searching) motion.searchElapsed += dPhase;
-      // Cosine ping-pong: the band eases at the poles instead of snapping back.
-      const scanY = 1 - (0.5 - 0.5 * Math.cos(motion.scanPhase * TWO_PI)) * 2;
-      const scanSigma = Math.max(0.02, p.scanWidth);
+      const scan = searchScan(motion.scanPhase, p.scanWidth);
+      const searchFx: SearchFrame | null = searching
+        ? {
+            elapsed: motion.searchElapsed,
+            time: t,
+            weight: scanW,
+            reduced: frame.reduced,
+          }
+        : null;
       const terminatorW = clamp01(p.terminator);
       const boundary = 1 - 2 * clamp01(progressRef.current);
 
@@ -391,33 +385,13 @@ export const ParticlesOrb = ({
         const depth = (z2 + 1) / 2;
         const perspective = 0.62 + depth * 0.5;
 
-        const highlightRank = SEARCH_HIGHLIGHT_RANK[i];
-        let highlight = 0;
-        if (searching && highlightRank !== NO_HIGHLIGHT) {
-          // Ranks are dealt round-robin into waves, so each wave scatters
-          // across the whole sphere instead of climbing as a single ring.
-          const wave = highlightRank % SEARCH_LIGHT_BATCHES;
-          const rise = frame.reduced
-            ? 1
-            : clamp01(
-                (motion.searchElapsed - wave * SEARCH_LIGHT_STAGGER) /
-                  SEARCH_LIGHT_RISE,
-              );
-          const eased = rise * rise * (3 - 2 * rise);
-          const breathe = frame.reduced
-            ? 1
-            : 0.86 + 0.14 * Math.sin(t * 1.4 + highlightRank * 0.85);
-          highlight = eased * breathe * scanW;
-        }
+        const highlight = searchFx
+          ? searchHighlight(SEARCH_RANKS[i], searchFx)
+          : 0;
 
         // The scan band is a horizontal slice in view space. Dots inside it
         // grow and stay bright; everything else dims back so the sweep reads.
-        let scanBand = 0;
-        if (scanW > 0.002) {
-          const dy = y1 - scanY;
-          const facing = Math.max(0, depth * 2 - 1);
-          scanBand = Math.exp(-(dy * dy) / (scanSigma * scanSigma)) * (0.3 + 0.7 * facing);
-        }
+        const scanBand = searchFx ? searchBand(y1, scan, depth) : 0;
 
         let pointRadius = radius;
         if (rippleAmp > 0.002) {
@@ -460,9 +434,9 @@ export const ParticlesOrb = ({
           dot += (0.75 + tone * 0.9 - dot) * ringW;
         }
 
-        if (scanW > 0.002) {
-          dot *= 1 + p.scanBoost * scanW * scanBand;
-          alpha *= 1 - (1 - p.scanDim) * scanW * (1 - scanBand);
+        if (searchFx) {
+          dot *= searchDotGain(scanBand, scanW, p.scanBoost);
+          alpha *= searchAlphaGain(scanBand, scanW, p.scanDim);
         }
 
         if (terminatorW > 0.002) {
@@ -482,8 +456,8 @@ export const ParticlesOrb = ({
           // popup dots keep their existing opacity while the constellation
           // grows. The tone still comes from the theme palette: it climbs
           // toward the palette's bright end as the dot lights up.
-          alpha += Math.max(0, SEARCH_LIGHT_ALPHA - alpha) * highlight;
-          dot *= 1 + SEARCH_LIGHT_GROW * highlight;
+          alpha += Math.max(0, SEARCH_LIGHT.alpha - alpha) * highlight;
+          dot *= 1 + SEARCH_LIGHT.grow * highlight;
         }
 
         px[i] = screenX;
@@ -493,10 +467,7 @@ export const ParticlesOrb = ({
         const ab = Math.min(ALPHA_BUCKETS - 1, Math.floor(alpha * ALPHA_BUCKETS));
         const toneBucket =
           highlight > 0
-            ? Math.min(
-                TONE_BUCKETS - 1,
-                Math.floor(SPHERE.toneBucket[i] + highlight * 3),
-              )
+            ? searchToneBucket(SPHERE.toneBucket[i], highlight, TONE_BUCKETS)
             : SPHERE.toneBucket[i];
         const b = toneBucket * ALPHA_BUCKETS + ab;
         bucketOf[i] = b;

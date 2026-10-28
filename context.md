@@ -1,5 +1,22 @@
 # Project Context
 
+## 2026-10-28 23:45 IST (18:15 UTC) — Searching animation API tightened
+
+- `src/registry/lib/orb-search.ts` now exports only the surface the render loop and its tests need (12 exports instead of 28). The wave stagger, rise, shimmer, LCG seed, and unlit marker are private, so retuning the effect does not widen the module API.
+- `searchHighlight(rank, frame)` owns the unlit-dot rule and takes one `SearchFrame` (`elapsed`, `time`, `weight`, `reduced`) built once per frame, so the canvas loop no longer branches on the sentinel rank or passes five positional arguments per dot.
+- `SEARCH_LIGHT` replaces the separate `SEARCH_LIGHT_ALPHA` / `SEARCH_LIGHT_GROW` / `SEARCH_TONE_SHIFT` exports with one descriptor shared by the loop and `searchToneBucket`.
+- `searchBand` takes the `SearchScan` object instead of loose `y`/`sigma` numbers, and `createSearchRanks` dropped its test-only `highlightCount` argument.
+- Rewrote `tests/orb-search.test.js` as behavior/invariant tests (contiguous ranks, scan ping-pong, band falloff, staggered reveal, weight fade, tone cap) that import the real constants rather than mirroring the formulas or hardcoding tuning values. Test imports keep the repo's `.ts` extension.
+- `AGENTS.md` now lists `orb-search.ts` in the registry tree and module notes.
+- Verified with `bun test tests/` (189 pass), `bun run typecheck`, and `bun run lint` (37 warnings, all pre-existing).
+
+## 2026-10-28 23:30 IST (18:00 UTC) — Searching animation moved to pure TypeScript
+
+- Added `src/registry/lib/orb-search.ts`: every hardcoded value and bit of math behind the `searching` animation now lives in one pure, testable module — constellation size/waves/stagger/rise, sweep rate, band width/boost/dim, the fade-out floor, the seeded rank table (`createSearchRanks`), and helpers (`searchScan`, `searchBand`, `searchReveal`, `searchShimmer`, `searchHighlight`, `searchDotGain`, `searchAlphaGain`, `searchToneBucket`).
+- `particles-orb.tsx` now calls those helpers instead of carrying inline magic numbers: the highlight block collapsed to one `searchHighlight(...)` call, the band to `searchBand(...)`, the gains to `searchDotGain`/`searchAlphaGain`, and the `searching` state row spreads `SEARCH_FX`. No visual change: same seed, constants, and math.
+- Added `tests/orb-search.test.js` (rank table, scan ping-pong, band falloff, staggered reveal, gains) and listed it in `tests/README.md`.
+- Verified with `bun test tests/` (189 pass), `bun run typecheck`, and `bun run lint` (warnings only, all pre-existing).
+
 ## 2026-10-28 23:00 IST (17:30 UTC) — Oxlint adopted as linter
 
 - Replaced ESLint with Oxlint (`oxlint@1.90.0` + `oxlint-tsgolint@7.0.2005`) as the project linter.
