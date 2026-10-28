@@ -1,0 +1,42 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["eslint", "typescript", "react", "jsx-a11y", "nextjs", "import"],
+  "settings": {
+    "react": {
+      "version": "19.3.0"
+    }
+  },
+  "rules": {
+    "eslint/no-var": "error",
+    "eslint/prefer-const": "error",
+    "eslint/prefer-spread": "error",
+    "typescript/no-explicit-any": "error",
+    "typescript/no-unused-vars": "error",
+    "typescript/prefer-as-const": "error",
+    "typescript/triple-slash-reference": "error",
+    "react/jsx-no-duplicate-props": "error",
+    "react-hooks/rules-of-hooks": "error",
+    "react-hooks/exhaustive-deps": "error",
+    "jsx-a11y/alt-text": "error",
+    "jsx-a11y/aria-props": "error",
+    "jsx-a11y/role-has-required-aria-props": "error",
+    "import/no-anonymous-default-export": "error",
+    "@next/next/no-img-element": "error",
+    "@next/next/no-async-client-component": "error",
+    "@next/next/no-title-in-document-head": "error",
+    "oxc/no-rest-spread-properties": "warn"
+  },
+  "options": {
+    "typeAware": true,
+    "typeCheck": true
+  },
+  "ignorePatterns": [
+    ".next/**",
+    "out/**",
+    "build/**",
+    "next-env.d.ts",
+    "node_modules/**",
+    "tests/**",
+    ".opencode/**"
+  ]
+}

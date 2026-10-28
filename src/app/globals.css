@@ -1,0 +1,535 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-sand: var(--sand);
+  --color-paper: var(--paper);
+  --color-paper-2: var(--paper-2);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-line: var(--line);
+  --color-sage: var(--sage);
+  --color-sage-text: var(--sage-text);
+  --color-sage-strong: var(--sage-strong);
+  --color-sage-wash: var(--sage-wash);
+  --font-sans: var(--font-atkinson);
+  --font-mono: var(--font-departure), ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-display: var(--font-baloo);
+  --font-heading: var(--font-baloo);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  --background: #f4f1ea;
+  --foreground: #2b2b2b;
+  --sand: #f4f1ea;
+  --paper: #fbf8f2;
+  --paper-2: #ffffff;
+  --ink: #2b2b2b;
+  --ink-muted: #5f594f;
+  --orb-color-from: var(--ink);
+  --orb-color-to: var(--sage);
+  --line: #e7e1d6;
+  --sage: #4a7c6f;
+  --sage-text: #3c685c;
+  --sage-strong: #3e6a5e;
+  --sage-wash: #e3eee9;
+  --stage-glow: #fbf8f2;
+  --stage-edge: #ece5d8;
+  color-scheme: light;
+  --card: #fbf8f2;
+  --card-foreground: #2b2b2b;
+  --popover: #ffffff;
+  --popover-foreground: #2b2b2b;
+  --primary: #3e6a5e;
+  --primary-foreground: #ffffff;
+  --secondary: #e3eee9;
+  --secondary-foreground: #3c685c;
+  --muted: #ebe6dc;
+  --muted-foreground: #5f594f;
+  --accent: #e3eee9;
+  --accent-foreground: #3c685c;
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: #e7e1d6;
+  --input: #e7e1d6;
+  --ring: #3e6a5e;
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --radius: 0.75rem;
+  --sidebar: #fbf8f2;
+  --sidebar-foreground: #2b2b2b;
+  --sidebar-primary: #3e6a5e;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e3eee9;
+  --sidebar-accent-foreground: #3c685c;
+  --sidebar-border: #e7e1d6;
+  --sidebar-ring: #3e6a5e;
+}
+
+.dark {
+  --background: #171512;
+  --foreground: #f2eee6;
+  --sand: #171512;
+  --paper: #211e19;
+  --paper-2: #29251f;
+  --ink: #f2eee6;
+  --ink-muted: #b9b0a2;
+  --line: #39332b;
+  --sage: #8cc9b7;
+  --sage-text: #a6dac9;
+  --sage-strong: #6cae9b;
+  --sage-wash: #25322d;
+  --stage-glow: #262119;
+  --stage-edge: #0f0d0a;
+  --card: #211e19;
+  --card-foreground: #f2eee6;
+  --popover: #29251f;
+  --popover-foreground: #f2eee6;
+  --primary: #9ed4c2;
+  --primary-foreground: #171512;
+  --secondary: #25322d;
+  --secondary-foreground: #a6dac9;
+  --muted: #2c2822;
+  --muted-foreground: #b9b0a2;
+  --accent: #25322d;
+  --accent-foreground: #a6dac9;
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: #39332b;
+  --input: #39332b;
+  --ring: #8cc9b7;
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: #211e19;
+  --sidebar-foreground: #f2eee6;
+  --sidebar-primary: #9ed4c2;
+  --sidebar-primary-foreground: #171512;
+  --sidebar-accent: #25322d;
+  --sidebar-accent-foreground: #a6dac9;
+  --sidebar-border: #39332b;
+  --sidebar-ring: #8cc9b7;
+  color-scheme: dark;
+}
+
+/* Shared page gutter: grows with the viewport and never sits under a notch. */
+:root {
+  --page-gutter: 0.75rem;
+}
+
+@media (min-width: 320px) {
+  :root {
+    --page-gutter: 1rem;
+  }
+}
+
+@media (min-width: 640px) {
+  :root {
+    --page-gutter: 1.5rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --page-gutter: 2rem;
+  }
+}
+
+@utility page-gutter {
+  padding-inline-start: max(var(--page-gutter), env(safe-area-inset-left));
+  padding-inline-end: max(var(--page-gutter), env(safe-area-inset-right));
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-sand text-ink;
+    overflow-x: clip;
+  }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+  p {
+    text-wrap: pretty;
+  }
+}
+
+/*
+ * Route transitions. React's <ViewTransition> applies the nav-forward and
+ * nav-back classes when a <Link transitionTypes> navigation runs. This is an
+ * Apple-style push/pop: the outgoing page drifts and scales back while the
+ * incoming page arrives from the opposite edge with a soft spring and fade.
+ */
+::view-transition {
+  pointer-events: none;
+}
+
+::view-transition-old(.nav-forward) {
+  animation: atlas-page-out-forward 320ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+::view-transition-new(.nav-forward) {
+  animation: atlas-page-in-forward 440ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+::view-transition-old(.nav-back) {
+  animation: atlas-page-out-back 320ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+::view-transition-new(.nav-back) {
+  animation: atlas-page-in-back 440ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+@keyframes atlas-page-out-forward {
+  from {
+    opacity: 1;
+    scale: 1;
+    translate: 0;
+  }
+  to {
+    opacity: 0;
+    scale: 0.985;
+    translate: -24px;
+  }
+}
+
+@keyframes atlas-page-in-forward {
+  from {
+    opacity: 0;
+    scale: 1.01;
+    translate: 36px;
+  }
+  to {
+    opacity: 1;
+    scale: 1;
+    translate: 0;
+  }
+}
+
+@keyframes atlas-page-out-back {
+  from {
+    opacity: 1;
+    scale: 1;
+    translate: 0;
+  }
+  to {
+    opacity: 0;
+    scale: 0.985;
+    translate: 24px;
+  }
+}
+
+@keyframes atlas-page-in-back {
+  from {
+    opacity: 0;
+    scale: 1.01;
+    translate: -36px;
+  }
+  to {
+    opacity: 1;
+    scale: 1;
+    translate: 0;
+  }
+}
+
+/*
+ * Start-flow motion. The card content pushes in the direction of travel,
+ * options arrive as a short stagger, and the confirmation badge lands with
+ * one small pop. Background shapes drift slowly enough to read as atmosphere
+ * rather than decoration.
+ */
+.start-step-forward {
+  animation: atlas-start-step-forward 440ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.start-step-back {
+  animation: atlas-start-step-back 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.start-choice-in {
+  animation: atlas-start-choice-in 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.start-pop {
+  animation: atlas-start-pop 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.start-blob-a {
+  animation: atlas-start-blob-a 18s ease-in-out infinite alternate;
+}
+
+.start-blob-b {
+  animation: atlas-start-blob-b 22s ease-in-out infinite alternate;
+}
+
+.start-orbit {
+  transform: translate(-50%, -50%);
+  animation: atlas-start-orbit 70s linear infinite;
+}
+
+.start-voice-bar {
+  transform-origin: bottom;
+  animation: atlas-start-voice-bar 0.9s ease-in-out infinite;
+}
+
+@keyframes atlas-start-step-forward {
+  from {
+    opacity: 0;
+    transform: translate3d(18px, 10px, 0) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes atlas-start-step-back {
+  from {
+    opacity: 0;
+    transform: translate3d(-18px, 8px, 0) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes atlas-start-choice-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes atlas-start-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  65% {
+    opacity: 1;
+    transform: scale(1.06);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes atlas-start-blob-a {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(-2.5rem, 1.5rem, 0) scale(1.06);
+  }
+}
+
+@keyframes atlas-start-blob-b {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(2rem, -1.25rem, 0) scale(1.05);
+  }
+}
+
+@keyframes atlas-start-orbit {
+  from {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+
+@keyframes atlas-start-voice-bar {
+  0%,
+  100% {
+    transform: scaleY(0.45);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+/*
+ * Dashboard orb stage. The backdrop is one vignette; the halo, rings, and
+ * ground shadow ride on the orb itself, so they stay centred no matter how the
+ * controls below measure. Only the halo moves with the voice, and its opacity
+ * and scale are written inline from a single frame loop in `OrbHalo`.
+ */
+.orb-stage-backdrop {
+  background: radial-gradient(
+    120% 90% at 50% 42%,
+    var(--stage-glow) 0%,
+    var(--sand) 44%,
+    var(--stage-edge) 100%
+  );
+}
+
+.orb-stage-grain {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23g)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  mix-blend-mode: multiply;
+  opacity: 0.035;
+}
+
+.dark .orb-stage-grain {
+  mix-blend-mode: soft-light;
+  opacity: 0.05;
+}
+
+.orb-halo {
+  opacity: 0.55;
+  transform: scale(1);
+  background: radial-gradient(
+    circle,
+    color-mix(in oklab, var(--stage-halo) 24%, transparent) 0%,
+    color-mix(in oklab, var(--stage-halo) 8%, transparent) 46%,
+    transparent 72%
+  );
+  filter: blur(16px);
+  transition:
+    opacity 400ms ease,
+    transform 700ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform;
+}
+
+.dark .orb-halo {
+  background: radial-gradient(
+    circle,
+    color-mix(in oklab, var(--stage-halo) 30%, transparent) 0%,
+    color-mix(in oklab, var(--stage-halo) 10%, transparent) 46%,
+    transparent 74%
+  );
+  mix-blend-mode: screen;
+}
+
+.orb-stage-ring {
+  border: 1px solid color-mix(in oklab, var(--sage) 16%, transparent);
+  border-radius: 9999px;
+}
+
+.dark .orb-stage-ring {
+  border-color: color-mix(in oklab, var(--sage) 10%, transparent);
+}
+
+.orb-stage-ground {
+  background: radial-gradient(
+    ellipse at center,
+    rgb(43 43 43 / 0.16) 0%,
+    rgb(43 43 43 / 0.05) 46%,
+    transparent 72%
+  );
+  filter: blur(10px);
+}
+
+.dark .orb-stage-ground {
+  background: radial-gradient(
+    ellipse at center,
+    rgb(140 201 183 / 0.12) 0%,
+    rgb(140 201 183 / 0.04) 46%,
+    transparent 72%
+  );
+}
+
+.orb-stage-in {
+  animation: atlas-orb-stage-in 600ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.orb-stage-in-delayed {
+  animation: atlas-orb-stage-in 520ms cubic-bezier(0.22, 1, 0.36, 1) 140ms both;
+}
+
+@keyframes atlas-orb-stage-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(*),
+  ::view-transition-new(*),
+  ::view-transition-group(*) {
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
+  }
+
+  .start-step-forward,
+  .start-step-back,
+  .start-choice-in,
+  .start-pop,
+  .start-blob-a,
+  .start-blob-b,
+  .start-orbit,
+  .start-voice-bar,
+  .orb-stage-in,
+  .orb-stage-in-delayed {
+    animation: none !important;
+  }
+
+  .orb-halo {
+    transition: none !important;
+  }
+}
+

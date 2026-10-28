@@ -1,0 +1,483 @@
+/**
+ * Server-only page fetcher for the orb's `webfetch` tool.
+ *
+ * This is an application-side fetch, not a provider server tool. It reads one
+ * public http(s) page, extracts readable text, and caps the result so a long
+ * page cannot flood the model's context.
+ *
+ * It deliberately does not run JavaScript, read PDFs, or fetch local/private
+ * addresses. Page text is untrusted data: the tool registry fences it before
+ * the model sees it.
+ */
+const FETCH_TIMEOUT_MS = 15_000;
+const MAX_REDIRECTS = 3;
+const MAX_BODY_BYTES = 512 * 1024;
+const MAX_URL_CHARS = 2_048;
+const MAX_TITLE_CHARS = 200;
+const USER_AGENT = "atlas/0.1.0";
+
+export const MAX_PAGE_CHARS = 3_000;
+export { MAX_BODY_BYTES };
+
+const PRIVATE_HOST_SUFFIXES = [
+  ".local",
+  ".localhost",
+  ".internal",
+  ".home.arpa",
+];
+
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&",
+  apos: "'",
+  gt: ">",
+  lt: "<",
+  nbsp: " ",
+  quot: '"',
+};
+
+export type FetchedPage = {
+  url: string;
+  title?: string;
+  text: string;
+};
+
+function isPrivateIpv4(hostname: string): boolean {
+  const parts = hostname.split(".");
+
+  if (parts.length !== 4) return false;
+  if (!parts.every((part) => /^\d{1,3}$/.test(part))) return false;
+
+  const octets = parts.map(Number);
+
+  if (octets.some((octet) => octet > 255)) return false;
+
+  const [a, b] = octets;
+
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    a >= 224
+  );
+}
+
+function isPrivateIpv6(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+
+  if (!host.includes(":")) return false;
+  if (host === "::" || host === "::1") return true;
+  if (host.startsWith("fc") || host.startsWith("fd")) return true;
+  if (host.startsWith("fe80")) return true;
+
+  // IPv4-mapped IPv6 is unusual for a public page; block it rather than
+  // trying to unpack every compressed form.
+  return host.startsWith("::ffff:");
+}
+
+function isBlockedHostname(hostname: string): boolean {
+  const host = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.$/, "");
+
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+
+  // Browsers accept decimal and hex IPv4 forms; DNS can resolve them to a
+  // loopback address that the dotted-quad check would miss.
+  if (/^\d+$/.test(host) || /^0x[0-9a-f]+$/.test(host)) return true;
+
+  return (
+    PRIVATE_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix)) ||
+    isPrivateIpv4(host) ||
+    isPrivateIpv6(host)
+  );
+}
+
+/** Validate one public web URL before any request is made. */
+export function assertFetchableUrl(raw: string): URL {
+  const trimmed = raw.trim();
+
+  if (!trimmed) throw new Error("The URL was empty.");
+  if (trimmed.length > MAX_URL_CHARS) throw new Error("The URL was too long.");
+
+  let url: URL;
+
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw new Error("The URL was not valid.");
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("Only http and https URLs can be fetched.");
+  }
+
+  if (url.username || url.password) {
+    throw new Error("URLs with credentials are not allowed.");
+  }
+
+  if (url.port && url.port !== "80" && url.port !== "443") {
+    throw new Error("Only standard web ports are allowed.");
+  }
+
+  if (isBlockedHostname(url.hostname)) {
+    throw new Error("That host is not available for fetching.");
+  }
+
+  return url;
+}
+
+function baseContentType(value: string): string {
+  return value.split(";")[0]?.trim().toLowerCase() ?? "";
+}
+
+function isSupportedContentType(value: string): boolean {
+  return (
+    value === "text/html" ||
+    value === "application/xhtml+xml" ||
+    value === "text/plain" ||
+    value === "text/markdown" ||
+    value === "application/json"
+  );
+}
+
+function isHtml(value: string): boolean {
+  return value === "text/html" || value === "application/xhtml+xml";
+}
+
+function isRedirect(status: number): boolean {
+  return status >= 300 && status < 400 && status !== 304;
+}
+
+function isAbortError(error: unknown): boolean {
+  const name =
+    typeof error === "object" && error !== null
+      ? (error as { name?: unknown }).name
+      : undefined;
+
+  return name === "TimeoutError" || name === "AbortError";
+}
+
+function decodeEntities(text: string): string {
+  return text.replace(
+    /&(#x[0-9a-f]+|#\d+|[a-z]+);/gi,
+    (match, entity: string) => {
+      if (entity.startsWith("#")) {
+        const hex = entity[1]?.toLowerCase() === "x";
+        const value = Number.parseInt(
+          entity.slice(hex ? 2 : 1),
+          hex ? 16 : 10,
+        );
+
+        if (!Number.isFinite(value) || value < 0 || value > 0x10ffff) {
+          return match;
+        }
+
+        try {
+          return String.fromCodePoint(value);
+        } catch {
+          return match;
+        }
+      }
+
+      return NAMED_ENTITIES[entity.toLowerCase()] ?? match;
+    },
+  );
+}
+
+/** Turn a static HTML page into readable plain text. */
+export function htmlToText(html: string): string {
+  return decodeEntities(
+    html
+      .replace(/<!--[\s\S]*?-->/g, " ")
+      .replace(/<head[^>]*>[\s\S]*?<\/head>/gi, " ")
+      .replace(
+        /<(script|style|noscript|svg|iframe|template)[^>]*>[\s\S]*?<\/\1>/gi,
+        " ",
+      )
+      .replace(
+        /<(nav|header|footer|aside|form)[^>]*>[\s\S]*?<\/\1>/gi,
+        " ",
+      )
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(
+        /<\/(?:p|div|li|tr|h[1-6]|section|article|blockquote|pre|table|ul|ol)>/gi,
+        "\n",
+      )
+      .replace(/<li[^>]*>/gi, "\n- ")
+      .replace(/<[^>]+>/g, " "),
+  )
+    .replace(/\r/g, "")
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export function extractTitle(html: string): string | undefined {
+  const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+
+  if (!match) return undefined;
+
+  const title = decodeEntities(match[1].replace(/<[^>]+>/g, " "))
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return title ? title.slice(0, MAX_TITLE_CHARS) : undefined;
+}
+
+const STOP_WORDS = new Set([
+  "about",
+  "after",
+  "also",
+  "and",
+  "are",
+  "but",
+  "can",
+  "for",
+  "from",
+  "have",
+  "how",
+  "into",
+  "its",
+  "not",
+  "that",
+  "the",
+  "their",
+  "them",
+  "then",
+  "there",
+  "these",
+  "they",
+  "this",
+  "was",
+  "were",
+  "what",
+  "when",
+  "where",
+  "which",
+  "who",
+  "why",
+  "will",
+  "with",
+  "you",
+  "your",
+]);
+
+function focusTerms(focus: string): string[] {
+  const found = focus.toLowerCase().match(/[a-z0-9][a-z0-9._-]{2,}/g) ?? [];
+
+  return [...new Set(found.filter((term) => !STOP_WORDS.has(term)))].slice(
+    0,
+    12,
+  );
+}
+
+/**
+ * Keep the paragraphs that best match the model's focus, preserving their
+ * original order. Without a focus (or without a match), return the start.
+ */
+export function selectRelevantText(
+  text: string,
+  focus: string | undefined,
+  maxChars = MAX_PAGE_CHARS,
+): string {
+  const clean = text.trim();
+
+  if (clean.length <= maxChars) return clean;
+
+  const terms = focusTerms(focus ?? "");
+
+  if (terms.length === 0) return clean.slice(0, maxChars).trimEnd();
+
+  const paragraphs = clean
+    .split(/\n+/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+
+  const scored = paragraphs.map((paragraph, index) => {
+    const lower = paragraph.toLowerCase();
+    const score = terms.reduce(
+      (total, term) => total + (lower.includes(term) ? 1 : 0),
+      0,
+    );
+
+    return { index, paragraph, score };
+  });
+  const matches = scored
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score || left.index - right.index);
+  const chosen = new Set<number>();
+  let used = 0;
+
+  for (const item of matches) {
+    const cost = item.paragraph.length + 2;
+
+    if (used + cost > maxChars) continue;
+
+    chosen.add(item.index);
+    used += cost;
+  }
+
+  if (chosen.size === 0) return clean.slice(0, maxChars).trimEnd();
+
+  return scored
+    .filter((item) => chosen.has(item.index))
+    .map((item) => item.paragraph)
+    .join("\n\n")
+    .slice(0, maxChars)
+    .trimEnd();
+}
+
+async function readBody(response: Response, limit: number): Promise<string> {
+  const declared = Number(response.headers.get("content-length") ?? "");
+
+  if (Number.isFinite(declared) && declared > limit) {
+    throw new Error("The page was too large.");
+  }
+
+  if (!response.body) return "";
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+
+      if (done) break;
+
+      total += value.byteLength;
+
+      if (total > limit) {
+        await reader.cancel().catch(() => {});
+        throw new Error("The page was too large.");
+      }
+
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return new TextDecoder().decode(bytes);
+}
+
+export type FetchPageOptions = {
+  focus?: string;
+  signal?: AbortSignal;
+};
+
+/** Fetch one public page and return capped, readable text. */
+export async function fetchPage(
+  rawUrl: string,
+  options: FetchPageOptions = {},
+): Promise<FetchedPage> {
+  const timeout = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, timeout])
+    : timeout;
+  let current = assertFetchableUrl(rawUrl);
+
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    let response: Response;
+
+    try {
+      response = await fetch(current.href, {
+        method: "GET",
+        redirect: "manual",
+        cache: "no-store",
+        signal,
+        headers: {
+          Accept:
+            "text/html, application/xhtml+xml, text/plain;q=0.9, application/json;q=0.8",
+          "User-Agent": USER_AGENT,
+        },
+      });
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new Error("The page took too long to load.");
+      }
+
+      throw new Error("The page could not be reached.");
+    }
+
+    if (isRedirect(response.status)) {
+      if (hop === MAX_REDIRECTS) {
+        throw new Error("The page redirected too many times.");
+      }
+
+      const location = response.headers.get("location");
+
+      if (!location) throw new Error("The page redirect had no destination.");
+
+      let next: URL;
+
+      try {
+        next = new URL(location, current);
+      } catch {
+        throw new Error("The page redirected to an invalid URL.");
+      }
+
+      current = assertFetchableUrl(next.href);
+      continue;
+    }
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        throw new Error("The page was not found (HTTP 404).");
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(`The page is not accessible (HTTP ${response.status}).`);
+      }
+
+      if (response.status === 429) {
+        throw new Error("The page is rate-limiting requests (HTTP 429).");
+      }
+
+      throw new Error(`The page returned HTTP ${response.status}.`);
+    }
+
+    const contentType = baseContentType(
+      response.headers.get("content-type") ?? "",
+    );
+
+    if (!isSupportedContentType(contentType)) {
+      throw new Error(
+        `That page type is not supported (${contentType || "unknown"}).`,
+      );
+    }
+
+    const body = await readBody(response, MAX_BODY_BYTES);
+    const title = isHtml(contentType) ? extractTitle(body) : undefined;
+    const text = selectRelevantText(
+      isHtml(contentType) ? htmlToText(body) : body,
+      options.focus,
+    );
+
+    if (!text) throw new Error("The page had no readable text.");
+
+    return {
+      url: current.href,
+      ...(title ? { title } : {}),
+      text,
+    };
+  }
+
+  throw new Error("The page redirected too many times.");
+}
