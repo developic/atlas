@@ -38,7 +38,8 @@ tests/
 ├── tool-trace.test.js
 ├── turn-stream.test.js
 ├── voice-activity.test.js
-└── wav.test.js
+├── wav.test.js
+└── web-fetch.test.js
 src/
 ├── app/
 │   ├── (site)/
@@ -53,11 +54,9 @@ src/
 │   ├── dashboard/
 │   │   └── page.tsx
 │   ├── fonts/
-│   │   ├── DepartureMono-LICENSE.txt
-│   │   └── DepartureMono-Regular.woff2
+│   │   └── DepartureMono-LICENSE.txt
 │   ├── start/
 │   │   └── page.tsx
-│   ├── favicon.ico
 │   ├── globals.css
 │   ├── layout.tsx
 │   └── not-found.tsx
@@ -74,7 +73,8 @@ src/
 │   │   ├── use-voice-activity.ts
 │   │   ├── use-voice-level.ts
 │   │   ├── voice-activity.ts
-│   │   └── voice-meter.tsx
+│   │   ├── voice-meter.tsx
+│   │   └── prompt-dock.tsx
 │   ├── layout/
 │   │   ├── ambient-backdrop.tsx
 │   │   ├── get-started-link.tsx
@@ -100,9 +100,12 @@ src/
 │       ├── collapsible.tsx
 │       ├── hover-card.tsx
 │       ├── inline-citation.tsx
+│       ├── input-group.tsx
+│       ├── input.tsx
 │       ├── message-scroller.tsx
 │       ├── not-found-scene.tsx
 │       ├── sources.tsx
+│       ├── textarea.tsx
 │       ├── theme-toggle.tsx
 │       └── trace.tsx
 ├── registry/
@@ -151,6 +154,10 @@ src/
 └── types/
     └── .gitkeep
 ```
+`public/` holds static assets:
+- **`public/assets/icons/`** — icon assets such as `favicon.ico`.
+- **`public/assets/font/`** — self-hosted font files such as `DepartureMono-Regular.woff2`.
+- **`public/voices/`** — Eighteen pre-recorded Cartesia Sonic MP3 samples (Skylar, Jacqueline, Gemma, Daniel, Parker, Archie × slow/steady/brisk) used by the `/start` voice and pace previews. The final personalized sample is generated at request time by `api/voice-preview`.
 
 `scripts/` also holds `generate-cartesia-voices.mjs` and the P0 diagnostic
 `omni-probe.mjs` (`bun run probe:omni`).
@@ -164,9 +171,8 @@ src/
   - **`api/orb/respond/`** — Server-only POST route for one orb turn. Accepts a recorded WAV (multipart `audio`, legacy WebM/MP4/Ogg still accepted) or a JSON `transcript`, plus a character-trimmed text-only `history` and optional onboarding `voice`/`pace`. The dashboard sends the clip straight to the free `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` model, which transcribes it and writes `{transcript, speak, conversation}` in one streaming call; the JSON tool protocol can add `websearch`, `webfetch`, or `get_current_time` rounds before the answer. Cartesia streams sentence-sized PCM16 chunks while the model is still writing, with whole-reply MP3 as the fallback when the PCM path produces nothing. Streams NDJSON events named after the action that produced them: `transcript`, `searching`/`tool`, `speak-delta`, `audio` (`pcm`, `sampleRate`, `seq`), `speaking` (the full text, sent before TTS finishes), `audio-done` on the PCM path or `audio-mp3` on the fallback, or a typed `error` with `code` and `message`. There is no upfront `thinking` frame: the dashboard already starts a turn in that state, and every later status follows something the model actually did, such as a web search. Keeps `NVIDIA_API_KEY`/`EXA_API_KEY`/`CARTESIA_API_KEY` server-side, validates voice and pace against the Cartesia catalogs, trims history to ~6000 characters without splitting user/assistant pairs, caps spoken replies at 600 characters, maps a 202/503/`ResourceExhausted` free worker to a retryable `busy` code (including an SSE error frame), passes `request.signal` into the omni turn so a disconnected client stops the search and TTS work, and emits one structured `orb-turn` log line without user content (`stage: "aborted"` instead of an error frame when the client is gone). The client retries a busy turn twice (1.5 s apart), and expected busy failures are not logged as server faults.
   - **`api/voice-preview/`** — Server-only POST route that generates the personalized final preview (name + selected voice + pace) with Cartesia through the shared `lib/cartesia-server.ts`. Validates the six voice IDs and three pace speeds, uses `CARTESIA_API_KEY` or the public demo token, and returns MP3 bytes.
   - **`dashboard/`** — The headerless `/dashboard` route. A centered particle orb with one voice button; deliberately no header, greeting, lede, or navigation link.
-  - **`fonts/`** — Self-hosted Departure Mono (SIL OFL) with its license file. Loaded through `next/font/local` in the root layout.
   - **`start/`** — The headerless `/start` route. The page supplies the centered sand/sage backdrop and metadata; the wizard UI lives in `components/start/`.
-  - **`favicon.ico`** — Browser tab icon, picked up automatically by Next.js's metadata file convention.
+  - **`favicon.ico`** — Moved to `public/assets/icons/favicon.ico` and referenced manually in the root layout via `<link rel="icon" href="/assets/icons/favicon.ico" />`.
   - **`globals.css`** — Tailwind entry point, shadcn/ui styles, and the light/dark theme tokens (sand, ink, sage, surfaces, borders).
   - **`layout.tsx`** — Root layout. Loads Atkinson Hyperlegible, Baloo 2, and Departure Mono, defines page metadata, and applies the pre-hydration theme script. Deliberately renders no header so the 404 page stays full-bleed.
   - **`not-found.tsx`** — Global 404. Headerless, uses the eye scene and a return-home link, and inherits the theme from the root layout.
@@ -207,6 +213,9 @@ src/
     - **`message-scroller.tsx`** — shadcn/ui (0.3.1) message scroller used as the transcript viewport: provider, auto-scroll, per-item `messageId` anchors, and the jump-to-end button.
     - **`hover-card.tsx`** — Base UI PreviewCard wrapper for hover/focus popups. Shared portal, positioner, paper surface, and open/close transition used by inline citations.
     - **`inline-citation.tsx`** — Renders a markdown link as a normal external anchor plus a hover/focus source card with the hostname, link label, and path. Only absolute HTTP(S) URLs become citations; other links fall back to a plain anchor.
+    - **`input-group.tsx`** — Wrapper that groups an input or textarea with leading/trailing adornments.
+    - **`input.tsx`** — Base UI text input with variant styling.
+    - **`textarea.tsx`** — Base UI multi-line textarea with variant styling.
     - **`not-found-scene.tsx`** — Client component for the 404 eyes. Pupils follow the pointer with spring physics, and the sockets blink on a randomized interval; both respect `prefers-reduced-motion`.
     - **`sources.tsx`** — The used-sources list under an assistant reply: a "Used N sources" trace trigger that expands into external links labeled by title (hostname fallback), so the transcript stays scannable until asked.
     - **`trace.tsx`** — Trace primitives for inline tool/status rows: `Trace`, `TraceLine` (running shimmer, error and pending states, static under reduced motion), `TraceIcon`, `TraceTitle`, `TraceDescription`, and the collapsible trigger/content pair.
@@ -237,8 +246,7 @@ src/
   - **`wav.ts`** — Client WAV helpers: `encodeWav` writes a mono PCM16 RIFF file, and `clipToWav` decodes a browser recording and re-encodes it at 16 kHz mono for the omni model.
   - **`web-fetch.ts`** — Server-only `webfetch` implementation. Validates http(s) URLs, rejects credentials, non-standard ports, localhost, `.local`/`.internal`, and private/link-local IP literals, follows at most three redirects with each hop re-validated, and composes a 15 s timeout with the turn signal. Caps the body at 512 KB, accepts HTML/plain text/Markdown/JSON, extracts readable text and the title, and keeps at most 3,000 characters, optionally ranked by a `focus` string. Never executes JavaScript or returns raw HTML.
 - **`src/types/`** — Shared TypeScript types and interfaces. `.gitkeep` keeps the empty directory tracked until real types are added.
-- **`tests/`** — Bun tests for pure logic and transport fixtures. `bun test tests/` runs the whole suite; `tests/README.md` lists each file. Coverage includes the VAD state machine (`voice-activity.test.js`), WAV encoding, turn parsing/caps, Exa compaction, the tool registry, native/JSON calls, and web-fetch validation/extraction (`orb-tools.test.js`, `web-fetch.test.js`), the injected-date/search-gate/fetch-branch prompt (`atlas-prompt.test.js`), SSE and incremental JSON, sentence/PCM scheduling, history parsing/trimming (`history.test.js`), tool-trace guards, detail caps, and URL shortening (`tool-trace.test.js`), source extraction and URL matching (`source-links.test.js`), the orb state/label helpers (`orb-chrome.test.js`), the reveal decision (`orb-reveal.test.js`), the NDJSON union and reader including tool detail/query dispatch, Cartesia request shape (`speech.test.js`), and streamed omni retries/busy frames/tool rounds including search→fetch, cross-round dedupe, and partial failures (`omni-stream.test.js`, with a mocked `fetch`). No test touches the network.
-- **`public/voices/`** — Eighteen pre-recorded Cartesia Sonic MP3 samples (Skylar, Jacqueline, Gemma, Daniel, Parker, Archie × slow/steady/brisk) used by the `/start` voice and pace previews. The final personalized sample is generated at request time by `api/voice-preview`.
+- **`tests/`** — Bun tests for pure logic and transport fixtures. `bun test tests/` runs the whole suite; `tests/README.md` lists each file. Coverage includes the VAD state machine (`voice-activity.test.js`), WAV encoding, turn parsing/caps, Exa compaction, the tool registry, native/JSON calls, and web-fetch validation/extraction (`orb-tools.test.js`, `web-fetch.test.js`), the injected-date/search-gate/fetch-branch prompt (`atlas-prompt.test.js`), SSE and incremental JSON, sentence/PCM scheduling, history parsing/trimming (`history.test.js`), tool-trace guards, detail caps, and URL shortening (`tool-trace.test.js`), source extraction and URL matching (`source-links.test.js`), the orb state/label helpers (`orb-chrome.test.js`), the reveal decision (`orb-reveal.test.js`), the NDJSON union and reader including tool detail/query dispatch, Cartesia request shape (`speech.test.js`), turn normalization (`orb-turn.test.js`), and streamed omni retries/busy frames/tool rounds including search→fetch, cross-round dedupe, and partial failures (`omni-stream.test.js`, with a mocked `fetch`). No test touches the network.
 - **`scripts/generate-cartesia-voices.mjs`** — Regenerates those 18 samples with Cartesia Sonic, using `generation_config.speed` (0.7/1/1.3) for the pace variants. Uses `CARTESIA_API_KEY` when set; otherwise requests Cartesia's rate-limited public demo token. Run with `bun run generate:voices`; Bun loads `.env` automatically.
 - **`scripts/omni-probe.mjs`** — P0 diagnostic for the free NVIDIA endpoint: baseline, streaming, native tools with the same strict schema the app sends, `response_format: json_object`, thinking-off, generated WAV input, and probe 7 for `response_format: json_schema`, which must pass before JSON mode is replaced. Run with `bun run probe:omni`; it exits non-zero only when the baseline fails. Native tools stay behind `OMNI_NATIVE_TOOLS=1` until the probe shows `tool_calls`.
 

@@ -411,6 +411,14 @@
 - `scripts/omni-probe.mjs` sends the same strict tool schema the app sends and adds probe 7 for `response_format: json_schema`; the default response format stays `json_object` until that probe returns the three keys in order.
 - Tests: `tests/orb-tools.test.js` and `tests/atlas-prompt.test.js` cover the nested shape, null nullable arguments, and each classification; `tests/omni-stream.test.js` covers repair-with-evidence, one correction for a broken request, the round cap ending in `no_reply`, per-id native results, duplicate searches running once, the turn-wide deadline, and the hybrid tool+speak reply. `bun test tests/` (124 pass), typecheck, and lint pass.
 
+## 2026-10-28 14:00 IST (08:30 UTC) — Icons and fonts moved to public/assets
+
+- Moved `src/app/favicon.ico` to `public/assets/icons/favicon.ico`; the root layout now references it with a manual `<link rel="icon" href="/assets/icons/favicon.ico" />` since Next.js no longer auto-picks it from `app/`.
+- Moved `src/app/fonts/DepartureMono-Regular.woff2` to `public/assets/font/DepartureMono-Regular.woff2`; `layout.tsx` updated the `localFont` src path accordingly. Only the license file remains in `src/app/fonts/`.
+- Removed `src/app/fonts/` entirely (the font now lives in `public/assets/font/`; only its license file remained).
+- Updated `AGENTS.md`: tree structure reflects the moves, `fonts/` and `favicon.ico` descriptions corrected, `public/assets/` block added, missing `prompt-dock.tsx`, UI files (`input-group`, `input`, `textarea`), and tests (`orb-turn`, `web-fetch`) added to the structure and descriptions.
+- Verified with `bun run typecheck`, `bun run lint`, and `bun run build`.
+
 ## 2026-10-28 14:30 IST (09:00 UTC) — Review fixes: terminal forced answer, cap-before-call, fence budget
 
 - `forceAnswer` is now terminal in native mode: the forced call drops `tools` (`allowTools: false`), and any remaining `tool_calls` throw `no_reply` with no repair request. In the JSON path, a further tool object after the cap also throws `no_reply` instead of being repaired.
