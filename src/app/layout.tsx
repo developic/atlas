@@ -17,7 +17,7 @@ const baloo = Baloo_2({
 });
 
 const departureMono = localFont({
-  src: "./fonts/DepartureMono-Regular.woff2",
+  src: "../../public/assets/font/DepartureMono-Regular.woff2",
   variable: "--font-departure",
   weight: "400",
   display: "swap",
@@ -46,6 +46,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${atkinson.variable} ${baloo.variable} ${departureMono.variable} antialiased`}
     >
       <head>
+        <link rel="icon" href="/assets/icons/favicon.ico" />
         <script dangerouslySetInnerHTML={{ __html: themeToggle }} />
       </head>
       <body className="flex min-h-dvh flex-col bg-sand text-ink">
