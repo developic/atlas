@@ -9,13 +9,10 @@ import {
   hexToRgb,
   orbVars,
   type OrbProps,
-  type OrbState,
 } from '../../lib/orb-state';
 import { mixRgb, rgba, type Rgb } from '../../lib/orb-color';
 import {
   createSearchRanks,
-  SEARCH_BAND_WIDTH,
-  SEARCH_FX,
   SEARCH_LIGHT,
   SEARCH_PHASE_START,
   SEARCH_WEIGHT_FLOOR,
@@ -26,7 +23,8 @@ import {
   searchScan,
   searchToneBucket,
   type SearchFrame,
-} from '../../lib/orb-search';
+} from '../../lib/status/searching';
+import { orbStatusParams as STATES } from '../../lib/status';
 import { useOrbAnimator, type OrbFrame } from '../../lib/use-orb-animator';
 
 const PARTICLE_COUNT = 960;
@@ -48,63 +46,7 @@ const SEARCH_RANKS = createSearchRanks(PARTICLE_COUNT);
 const ERROR_FROM_RGB = hexToRgb(ERROR_COLOR_FROM);
 const ERROR_TO_RGB = hexToRgb(ERROR_COLOR_TO);
 
-type StateParams = {
-  tempo: number;
-  spin: number;
-  breathe: number;
-  drift: number;
-  ripple: number;
-  swell: number;
-  flow: number;
-  swirl: number;
-  pulse: number;
-  pulseRate: number;
-  ring: number;
-  jitter: number;
-  shake: number;
-  alpha: number;
-  rest: number;
-  /** Weight of the searching scan band. */
-  scan: number;
-  /** Sweeps per second; one sweep is a top-to-bottom pass and back. */
-  scanRate: number;
-  /** Gaussian half-width of the band, in sphere units. */
-  scanWidth: number;
-  /** Extra dot radius at the centre of the band. */
-  scanBoost: number;
-  /** Alpha multiplier for dots outside the band. */
-  scanDim: number;
-  /** Weight of the `progressing` day/night terminator. */
-  terminator: number;
-};
 
-/** Effects that only `searching` and `progressing` switch on. */
-const NEUTRAL_FX = {
-  scan: 0,
-  scanRate: 0,
-  scanWidth: SEARCH_BAND_WIDTH,
-  scanBoost: 0,
-  scanDim: 1,
-  terminator: 0,
-} as const;
-
-const STATES: Record<OrbState, StateParams> = {
-  idle: { tempo: 1, spin: 0.14, breathe: 0.05, drift: 1, ripple: 0, swell: 0.04, flow: 0, swirl: 0, pulse: 0, pulseRate: 1, ring: 0, jitter: 0, shake: 0, alpha: 0.72, rest: 0, ...NEUTRAL_FX },
-  connecting: { tempo: 1, spin: 0.3, breathe: 0.02, drift: 0.2, ripple: 0, swell: 0, flow: 0, swirl: 0, pulse: 0.06, pulseRate: 0.5, ring: 1, jitter: 0, shake: 0, alpha: 0.8, rest: 0.12, ...NEUTRAL_FX },
-  listening: { tempo: 1, spin: 0.55, breathe: 0.012, drift: 0, ripple: 1, swell: 0.12, flow: 0, swirl: 0, pulse: 0, pulseRate: 1, ring: 0, jitter: 0, shake: 0, alpha: 0.92, rest: 0.55, ...NEUTRAL_FX },
-  thinking: { tempo: 1, spin: 0.32, breathe: 0.01, drift: 0, ripple: 0, swell: 0, flow: 0, swirl: 0, pulse: 1, pulseRate: 1, ring: 0, jitter: 0, shake: 0, alpha: 0.78, rest: 0.3, ...NEUTRAL_FX },
-  // The Sinua "globe" idea: a scan meridian sweeps the sphere, growing and
-  // brightening the dots it crosses while the rest dim back.
-  searching: { tempo: 1, spin: 0.3, breathe: 0.02, drift: 0, ripple: 0, swell: 0.05, flow: 0, swirl: 0, pulse: 0, pulseRate: 1, ring: 0, jitter: 0, shake: 0, alpha: 0.9, rest: 0.12, ...NEUTRAL_FX, ...SEARCH_FX },
-  speaking: { tempo: 1, spin: 0.24, breathe: 0.01, drift: 0, ripple: 0, swell: 0.06, flow: 1, swirl: 1, pulse: 0, pulseRate: 1, ring: 0, jitter: 0.6, shake: 0, alpha: 0.94, rest: 0.55, ...NEUTRAL_FX },
-  // The Sinua "eclipse" idea: a fixed day/night line in view space, driven by
-  // a real 0..1 progress value. The sphere keeps spinning under the line.
-  progressing: { tempo: 1, spin: 0.06, breathe: 0.01, drift: 0, ripple: 0, swell: 0, flow: 0, swirl: 0, pulse: 0, pulseRate: 1, ring: 0, jitter: 0, shake: 0, alpha: 0.95, rest: 0, ...NEUTRAL_FX, terminator: 1 },
-  // Smooth, slow heartbeat instead of the old jitter: the sphere inhales and
-  // settles under the rose palette, with no shake.
-  error: { tempo: 1, spin: 0.12, breathe: 0.03, drift: 0.2, ripple: 0, swell: 0.02, flow: 0, swirl: 0, pulse: 0.7, pulseRate: 0.55, ring: 0, jitter: 0, shake: 0, alpha: 0.9, rest: 0.15, ...NEUTRAL_FX },
-  disabled: { tempo: 0.04, spin: 0, breathe: 0, drift: 0, ripple: 0, swell: 0, flow: 0, swirl: 0, pulse: 0, pulseRate: 1, ring: 0, jitter: 0, shake: 0, alpha: 0.45, rest: 0, ...NEUTRAL_FX },
-};
 
 interface Sphere {
   x: Float32Array;

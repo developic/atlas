@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import { formatResults } from "../src/lib/exa.ts";
-import { parseToolRequest } from "../src/lib/orb-tools.ts";
+import { formatResults } from "../src/lib/tools/websearch.ts";
+import { parseToolRequest } from "../src/lib/tools/registry.ts";
 
 describe("formatResults", () => {
   test("drops results without a URL and trims highlights", () => {

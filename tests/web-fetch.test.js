@@ -7,7 +7,7 @@ import {
   htmlToText,
   MAX_PAGE_CHARS,
   selectRelevantText,
-} from "../src/lib/web-fetch.ts";
+} from "../src/lib/tools/webfetch.ts";
 
 const realFetch = globalThis.fetch;
 let calls = [];

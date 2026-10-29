@@ -14,7 +14,7 @@ import {
   respondToAudio,
   respondToText,
   type OmniTurn,
-} from "@/lib/nvidia-omni";
+} from "@/lib/model";
 import { isOrbError, OrbError, userMessageFor } from "@/lib/orb-errors";
 import { MAX_TRANSCRIPT_CHARS, trimForSpeech } from "@/lib/orb-turn";
 import { createSentenceChunker } from "@/lib/sentence-chunker";

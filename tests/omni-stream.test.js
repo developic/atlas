@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import { respondToAudio, respondToText, composeTurnSignal, TURN_BUDGET_MS } from "../src/lib/nvidia-omni.ts";
+import { respondToAudio, respondToText, composeTurnSignal, TURN_BUDGET_MS } from "../src/lib/model.ts";
 
 const realFetch = globalThis.fetch;
 const realExaKey = process.env.EXA_API_KEY;

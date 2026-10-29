@@ -10,9 +10,9 @@
  *
  * Structure follows the Gemini prompting guide: one home per rule, consistent
  * few-shot examples, and the critical output format first. Tool rules live in
- * `orb-tools.ts`, so the prompt and the runner cannot drift apart.
+ * `tools/registry.ts`, so the prompt and the runner cannot drift apart.
  */
-import { renderToolPrompt } from "./orb-tools";
+import { renderToolPrompt } from "./tools/registry";
 
 /**
  * Static prompt body. `buildAtlasSystemPrompt` puts the real date in front of

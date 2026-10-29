@@ -11,7 +11,7 @@ import {
   parseToolRequests,
   renderToolPrompt,
   runToolWithSources,
-} from "../src/lib/orb-tools.ts";
+} from "../src/lib/tools/index.ts";
 
 describe("parseToolRequests", () => {
   test("accepts one websearch object", () => {

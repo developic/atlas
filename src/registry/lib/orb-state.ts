@@ -1,5 +1,15 @@
 import type { CSSProperties, Ref, RefObject } from 'react';
 
+import { idleEnergy, idleMotion } from './status/idle';
+import { connectingEnergy, connectingMotion } from './status/connecting';
+import { listeningEnergy, listeningMotion } from './status/listening';
+import { thinkingEnergy, thinkingMotion } from './status/thinking';
+import { searchingEnergy, searchingMotion } from './status/searching';
+import { speakingEnergy, speakingMotion } from './status/speaking';
+import { progressingEnergy, progressingMotion } from './status/progressing';
+import { errorEnergy, errorMotion } from './status/error';
+import { disabledEnergy, disabledMotion } from './status/disabled';
+
 export type OrbState =
   | 'idle'
   | 'connecting'
@@ -35,8 +45,31 @@ export interface OrbProps {
   ref?: Ref<HTMLDivElement>;
 }
 
-export const ERROR_COLOR_FROM = '#fb7185';
-export const ERROR_COLOR_TO = '#f43f5e';
+export type StateParams = {
+  tempo: number;
+  spin: number;
+  breathe: number;
+  drift: number;
+  ripple: number;
+  swell: number;
+  flow: number;
+  swirl: number;
+  pulse: number;
+  pulseRate: number;
+  ring: number;
+  jitter: number;
+  shake: number;
+  alpha: number;
+  rest: number;
+  scan: number;
+  scanRate: number;
+  scanWidth: number;
+  scanBoost: number;
+  scanDim: number;
+  terminator: number;
+};
+
+export { ERROR_COLOR_FROM, ERROR_COLOR_TO } from './status/error';
 
 export const hexToRgb = (hex: string): [number, number, number] => {
   const clean = hex.replace('#', '');
@@ -56,34 +89,48 @@ export type OrbMotion = 'ripple' | 'pulse' | 'flow' | 'none';
 export const stateMotion = (state: OrbState): OrbMotion => {
   switch (state) {
     case 'listening':
-      return 'ripple';
+      return listeningMotion;
     case 'thinking':
-      return 'pulse';
+      return thinkingMotion;
     case 'speaking':
-      return 'flow';
+      return speakingMotion;
+    case 'searching':
+      return searchingMotion;
+    case 'connecting':
+      return connectingMotion;
+    case 'idle':
+      return idleMotion;
+    case 'progressing':
+      return progressingMotion;
+    case 'error':
+      return errorMotion;
+    case 'disabled':
+      return disabledMotion;
     default:
       return 'none';
   }
 };
 
-const wave = (x: number): number => 0.5 - 0.5 * Math.cos(x);
-
 export const stateEnergy = (state: OrbState, t: number): number => {
   switch (state) {
     case 'listening':
-      return 0.4 + 0.32 * wave(t * 17) + 0.18 * wave(t * 8.2 + 3);
+      return listeningEnergy(t);
     case 'speaking':
-      return 0.3 + 0.24 * wave(t * 12.4) + 0.16 * wave(t * 6 + 1.2);
+      return speakingEnergy(t);
     case 'thinking':
-      return 0.24 + 0.2 * wave(t * 4.8);
+      return thinkingEnergy(t);
     case 'searching':
-      return 0.12 + 0.08 * wave(t * 2.4);
+      return searchingEnergy(t);
     case 'progressing':
-      return 0.08 + 0.05 * wave(t * 1.4);
+      return progressingEnergy(t);
     case 'connecting':
-      return 0.12 + 0.1 * wave(t * 3.2);
+      return connectingEnergy(t);
     case 'error':
-      return 0.16 + 0.1 * wave(t * 1.6);
+      return errorEnergy(t);
+    case 'idle':
+      return idleEnergy(t);
+    case 'disabled':
+      return disabledEnergy(t);
     default:
       return 0;
   }

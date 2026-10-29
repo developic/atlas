@@ -38,7 +38,7 @@ import {
   type NativeCall,
   type ToolRequest,
   type ToolResult,
-} from "./orb-tools";
+} from "./tools/registry";
 import { selectReplySources, type SourceLink } from "./source-links";
 import { parseSseStream } from "./sse";
 
