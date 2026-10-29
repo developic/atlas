@@ -34,6 +34,28 @@ const TURN_TIMEOUT_MS = 100_000;
 /** A turn shows a handful of tool rows, not every repeated round. */
 const MAX_TURN_TOOLS = 6;
 
+/**
+ * One affinity id per browser session. Baseten routes requests that share it
+ * to the same replica, so the system prompt and the growing history stay in
+ * that replica's prompt cache and bill at the cached input rate.
+ */
+const SESSION_KEY = "atlas.orb.session";
+
+function sessionId(): string | undefined {
+  try {
+    const existing = sessionStorage.getItem(SESSION_KEY);
+    if (existing) return existing;
+
+    const id = crypto.randomUUID();
+    sessionStorage.setItem(SESSION_KEY, id);
+
+    return id;
+  } catch {
+    // Storage can be blocked; prompt caching is optional, the turn is not.
+    return undefined;
+  }
+}
+
 type TurnBody = {
   body: BodyInit;
   headers?: HeadersInit;
@@ -432,6 +454,9 @@ export function useOrbTurn({
           if (saved?.voiceId) form.append("voice", saved.voiceId);
           if (saved?.pace) form.append("pace", saved.pace);
 
+          const affinity = sessionId();
+          if (affinity) form.append("session", affinity);
+
           return { body: form };
         },
       });
@@ -477,6 +502,7 @@ export function useOrbTurn({
               ),
               voice: saved?.voiceId ?? undefined,
               pace: saved?.pace ?? undefined,
+              session: sessionId(),
             }),
           };
         },

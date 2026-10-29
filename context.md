@@ -1,5 +1,18 @@
 # Project Context
 
+## 2026-10-29 12:22 IST (06:52 UTC) — Muse Spark Open: cheapest reasoning depth plus every cost and usage lever
+
+- `src/lib/model.ts` now pins `reasoning_effort: "low"` on both the streaming and non-streaming paths. Muse Spark Open always reasons and cannot be switched off; its default depth is `xhigh`, and reasoning tokens bill as output at $4.25/M, so a one-to-three-sentence voice reply was paying for thinking it never used.
+- Streaming requests now send `stream_options: { include_usage: true }` instead of relying on the server default, so the final frame always carries token usage.
+- `TurnMeta` gained `cachedTokens`, `audioTokens`, and `reasoningTokens`, read from `usage.prompt_tokens_details` / `usage.completion_tokens_details`. The `orb-turn` log line prints all three.
+- Prompt-cache affinity: the client stores one id in `sessionStorage` (`atlas.orb.session`) and sends it as `session`; the route validates it to 64 chars and `model.ts` forwards it as the `x-session-affinity` header, so every turn of a conversation lands on the same replica and the identical system prompt plus growing history bill at $0.15/M cached input instead of $1.25/M.
+- `respondToAudio` / `respondToText` now take a `TurnContext` (`{ signal, session }`) as their last argument instead of a bare `AbortSignal`. Internal calls thread one `TurnRun` (composed deadline + session) instead of loose signals.
+- Status mapping corrected against Baseten's error docs: **529** (capacity shedding) joins 429/503 as a retryable `busy`, and **402** (billing) maps to `config`. Previously a 529 surfaced as a hard `audio` failure and was not retried.
+- Native tool rounds advertise `parallel_tool_calls: true`; the runner already executes a round's calls together and echoes one `tool_call_id` per call.
+- `response_format: { type: "json_object" }` is kept but documented as advisory: Muse Spark Open accepts it without constraining output, so the system prompt and `parseTurn` remain the real guarantee.
+- Tests: `tests/omni-stream.test.js` gained six cases (reasoning depth + usage frame, affinity header present/absent, cached/audio/reasoning token reporting, 529 → busy, 402 → config) and its fetch stub now records request headers. Two existing tests pass `{ signal }` instead of a bare signal.
+- Verified: `bun x tsc --noEmit` clean, `bun test tests/` 194 pass / 0 fail, lint has no new errors, `next build` succeeds.
+
 ## 2026-10-29 11:31 IST (06:01 UTC) — Migrate orb model from NVIDIA to Baseten Muse Spark Open
 
 - Renamed `src/lib/nvidia-omni.ts` to `src/lib/model.ts`; it now calls Baseten's OpenAI-compatible Chat Completions endpoint (`https://inference.baseten.co/v1/chat/completions`) with `Authorization: Bearer $BASETEN_API_KEY` and model `meta-models/muse-spark-open-1026`.

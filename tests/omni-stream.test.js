@@ -61,6 +61,7 @@ function installFetch(responses) {
     requests.push({
       url: String(input),
       body: init?.body ? JSON.parse(String(init.body)) : null,
+      headers: init?.headers ?? {},
       signal: init?.signal,
     });
 
@@ -961,13 +962,94 @@ describe("web fetch", () => {
       "audio/wav",
       [],
       {},
-      controller.signal,
+      { signal: controller.signal },
     ).catch((caught) => caught);
 
     expect(toolSignal).toBeInstanceOf(AbortSignal);
     expect(toolSignal.aborted).toBe(true);
     expect(modelCalls).toBe(1);
     expect(error.code).toBe("timeout");
+  });
+});
+
+describe("Muse Spark Open request shape", () => {
+  test("uses the cheapest reasoning depth and asks for a usage frame", async () => {
+    installFetch([
+      finalTurn({ transcript: "hi", speak: "Hi.", conversation: "Hi." }),
+    ]);
+
+    await respondToAudio(Buffer.from([1]), "audio/wav");
+
+    expect(requests[0].body.reasoning_effort).toBe("low");
+    expect(requests[0].body.stream_options).toEqual({ include_usage: true });
+    expect(requests[0].body.stream).toBe(true);
+  });
+
+  test("sends the conversation affinity key as a header", async () => {
+    installFetch([
+      finalTurn({ transcript: "hi", speak: "Hi.", conversation: "Hi." }),
+    ]);
+
+    await respondToText("hi", [], {}, { session: "  session-abc  " });
+
+    expect(requests[0].headers["x-session-affinity"]).toBe("session-abc");
+  });
+
+  test("omits the affinity header when the client sends no session", async () => {
+    installFetch([
+      finalTurn({ transcript: "hi", speak: "Hi.", conversation: "Hi." }),
+    ]);
+
+    await respondToText("hi");
+
+    expect(requests[0].headers["x-session-affinity"]).toBeUndefined();
+  });
+
+  test("reports cached, audio, and reasoning tokens from the usage frame", async () => {
+    installFetch([
+      sseResponse([
+        contentEvent(
+          JSON.stringify({
+            transcript: "hi",
+            speak: "Hi.",
+            conversation: "Hi.",
+          }),
+        ),
+        {
+          choices: [],
+          usage: {
+            prompt_tokens: 1_000,
+            completion_tokens: 50,
+            prompt_tokens_details: { cached_tokens: 900, audio_tokens: 120 },
+            completion_tokens_details: { reasoning_tokens: 30 },
+          },
+        },
+        finishEvent("stop"),
+      ]),
+    ]);
+
+    const turn = await respondToText("hi");
+
+    expect(turn.meta.promptTokens).toBe(1_000);
+    expect(turn.meta.cachedTokens).toBe(900);
+    expect(turn.meta.audioTokens).toBe(120);
+    expect(turn.meta.reasoningTokens).toBe(30);
+  });
+
+  test("maps 529 capacity shedding to a retryable busy error", async () => {
+    installFetch([new Response("overloaded", { status: 529 })]);
+
+    const error = await respondToText("hi").catch((caught) => caught);
+
+    expect(error.code).toBe("busy");
+  });
+
+  test("maps 402 to a config error instead of a generic failure", async () => {
+    installFetch([new Response("payment required", { status: 402 })]);
+
+    const error = await respondToText("hi").catch((caught) => caught);
+
+    expect(error.code).toBe("config");
   });
 });
 
@@ -998,9 +1080,12 @@ describe("external cancellation", () => {
     const controller = new AbortController();
     controller.abort();
 
-    const error = await respondToText("hi", [], {}, controller.signal).catch(
-      (caught) => caught,
-    );
+    const error = await respondToText(
+      "hi",
+      [],
+      {},
+      { signal: controller.signal },
+    ).catch((caught) => caught);
 
     expect(error.code).toBe("timeout");
     expect(requests).toHaveLength(0);

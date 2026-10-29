@@ -29,6 +29,8 @@ type TurnInput = {
   history: ChatMessage[];
   voice?: CartesiaVoiceId;
   pace?: CartesiaPace;
+  /** Stable per-conversation id; routes turns to one replica for prompt caching. */
+  session?: string;
 };
 
 /**
@@ -160,13 +162,13 @@ export async function POST(request: Request) {
               input.mimeType,
               input.history,
               callbacks,
-              clientSignal,
+              { signal: clientSignal, session: input.session },
             )
           : await respondToText(
               input.transcript,
               input.history,
               callbacks,
-              clientSignal,
+              { signal: clientSignal, session: input.session },
             );
 
         if (!turn.speak) {
@@ -219,7 +221,10 @@ export async function POST(request: Request) {
             model: turn.meta.model,
             finishReason: turn.meta.finishReason,
             promptTokens: turn.meta.promptTokens,
+            cachedTokens: turn.meta.cachedTokens,
+            audioTokens: turn.meta.audioTokens,
             completionTokens: turn.meta.completionTokens,
+            reasoningTokens: turn.meta.reasoningTokens,
             toolRounds: turn.meta.toolRounds,
             audio: pcmSent ? "pcm" : "mp3",
           }),
@@ -289,6 +294,7 @@ async function readRequest(request: Request): Promise<TurnInput> {
       history?: unknown;
       voice?: unknown;
       pace?: unknown;
+      session?: unknown;
     };
 
     return {
@@ -301,6 +307,7 @@ async function readRequest(request: Request): Promise<TurnInput> {
       history: parseHistory(body.history),
       voice: isCartesiaVoiceId(body.voice) ? body.voice : undefined,
       pace: isCartesiaPace(body.pace) ? body.pace : undefined,
+      session: readSession(body.session),
     };
   }
 
@@ -310,6 +317,7 @@ async function readRequest(request: Request): Promise<TurnInput> {
   const voice = form.get("voice");
   const pace = form.get("pace");
   const transcript = form.get("transcript");
+  const session = readSession(form.get("session"));
   const preferences = {
     voice: isCartesiaVoiceId(voice) ? voice : undefined,
     pace: isCartesiaPace(pace) ? pace : undefined,
@@ -324,6 +332,7 @@ async function readRequest(request: Request): Promise<TurnInput> {
           ? transcript.trim().slice(0, MAX_TRANSCRIPT_CHARS)
           : "",
       history,
+      session,
       ...preferences,
     };
   }
@@ -337,6 +346,20 @@ async function readRequest(request: Request): Promise<TurnInput> {
     mimeType: file.type,
     transcript: "",
     history,
+    session,
     ...preferences,
   };
+}
+
+/**
+ * The affinity key is a routing hint, not conversation content. Anything that
+ * is not a short string is dropped so a malformed client cannot put arbitrary
+ * text into a request header.
+ */
+function readSession(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+
+  const session = value.trim().slice(0, 64);
+
+  return session || undefined;
 }
