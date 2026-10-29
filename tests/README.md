@@ -6,7 +6,7 @@ bun test tests/
 
 The suite is deterministic and offline. Tests import the TypeScript modules
 directly through Bun; the omni-stream tests replace `globalThis.fetch` with
-in-memory SSE responses, so no NVIDIA, Exa, or Cartesia call is made.
+in-memory SSE responses, so no Baseten, Exa, or Cartesia call is made.
 
 | File | Covers |
 | --- | --- |
@@ -31,19 +31,17 @@ in-memory SSE responses, so no NVIDIA, Exa, or Cartesia call is made.
 ## Probe
 
 `scripts/omni-probe.mjs` is a diagnostic, not a test. Run it only when the
-NVIDIA endpoint changes or native tools need re-checking:
+Baseten endpoint changes or native tools need re-checking:
 
 ```bash
 bun run probe:omni
 ```
 
-It needs `NVIDIA_API_KEY` in `.env`, prints seven result blocks (baseline,
-streaming, native tools, `json_object`, thinking-off, WAV input, `json_schema`),
+It needs `BASETEN_API_KEY` in `.env`, prints seven result blocks (baseline,
+streaming, native tools, `json_object`, reasoning-effort-high, WAV input, `json_schema`),
 and exits non-zero only when the baseline request fails. Set
-`OMNI_NATIVE_TOOLS=1` only after the tool block shows real `tool_calls`; the JSON
-tool protocol is the default because the free worker was returning 503 during
-the first probe. `json_schema` output is evidence for replacing `json_object`,
-not a flag that exists yet.
+`BASETEN_NATIVE_TOOLS=1` only after the tool block shows real `tool_calls`; the JSON
+tool protocol is the default.
 
 ## Fixtures
 
