@@ -3,10 +3,9 @@ import { describe, expect, test } from "bun:test";
 import { extractJsonObject } from "../src/lib/json-extract.ts";
 import { OrbError } from "../src/lib/orb-errors.ts";
 import {
-  MAX_SPEAK_CHARS,
+  normalizeSpeech,
   normalizeTurn,
   parseTurn,
-  trimForSpeech,
 } from "../src/lib/orb-turn.ts";
 
 describe("parseTurn", () => {
@@ -80,23 +79,22 @@ describe("normalizeTurn", () => {
     });
   });
 
-  test("caps speak and conversation", () => {
+  test("keeps a long speak intact while capping conversation", () => {
+    const speak = "a".repeat(2_000);
     const turn = normalizeTurn({
       transcript: "hi",
-      speak: "a".repeat(2_000),
+      speak,
       conversation: "b".repeat(10_000),
     });
 
-    expect(turn.speak.length).toBe(MAX_SPEAK_CHARS);
+    expect(turn.speak).toBe(speak);
     expect(turn.conversation.length).toBe(6_000);
   });
 
-  test("keeps a complete sentence when trimming speech", () => {
-    const text = `${"a".repeat(300)}. ${"b".repeat(400)}`;
-    const trimmed = trimForSpeech(text);
+  test("normalizes whitespace without truncating speech", () => {
+    const text = `${"a".repeat(300)}.   ${"b".repeat(700)}`;
 
-    expect(trimmed.length).toBeLessThanOrEqual(MAX_SPEAK_CHARS);
-    expect(trimmed.endsWith(".")).toBe(true);
+    expect(normalizeSpeech(text)).toBe(`${"a".repeat(300)}. ${"b".repeat(700)}`);
   });
 });
 

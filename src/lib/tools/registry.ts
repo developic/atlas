@@ -42,11 +42,13 @@ import {
   websearchTool,
   WEBSEARCH_ARG_LIMITS,
 } from "./websearch";
+import { createTool, CREATE_LIMITS, runCreate } from "./create";
 
 export const ORB_TOOLS: readonly OrbTool[] = [
   websearchTool,
   webfetchTool,
   currentTimeTool,
+  createTool,
 ];
 
 /**
@@ -57,6 +59,7 @@ const ARG_LIMITS: Partial<Record<OrbToolName, Record<string, number>>> = {
   websearch: WEBSEARCH_ARG_LIMITS,
   webfetch: WEBFETCH_ARG_LIMITS,
   get_current_time: CURRENT_TIME_ARG_LIMITS,
+  create: CREATE_LIMITS,
 };
 const MAX_TRANSCRIPT_ARG_CHARS = 4_000;
 
@@ -301,6 +304,10 @@ export async function runToolWithSources(
   if (name === "websearch") return runWebsearch(args, signal);
   if (name === "webfetch") return runWebfetch(args, signal);
   if (name === "get_current_time") return runCurrentTime(args);
+  if (name === "create") {
+    const res = runCreate(args);
+    return { content: res.content, sources: [] };
+  }
 
   return {
     content: `Unknown tool ${JSON.stringify(name)}. Available tools: ${ORB_TOOL_NAMES.join(", ")}.`,

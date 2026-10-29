@@ -12,7 +12,7 @@ in-memory SSE responses, so no Baseten, Exa, or Cartesia call is made.
 | --- | --- |
 | `voice-activity.test.js` | VAD arm delay, thresholds, silence, min/max speech, cooldown |
 | `wav.test.js` | RIFF header, PCM16 conversion, clipping, mono downmix |
-| `orb-turn.test.js` | JSON normalization, caps, sentence-safe speech trim, malformed payloads |
+| `orb-turn.test.js` | JSON normalization, transcript/conversation caps, whitespace normalization for speech, malformed payloads |
 | `exa-search.test.js` | Exa result compaction and the JSON `websearch` request shape |
 | `orb-tools.test.js` | Tool registry, nested/flat JSON requests, classification with partial invalid calls, per-argument caps, per-id native calls, `runToolWithSources`, fetch fencing |
 | `web-fetch.test.js` | URL validation and private-host blocking, HTML extraction, focus selection, fetch success, redirect, 404, unsupported type, oversize, timeout |

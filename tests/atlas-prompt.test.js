@@ -48,6 +48,13 @@ describe("buildAtlasSystemPrompt", () => {
     expect(prompt).toContain('"I\'m looking up"');
   });
 
+  test("sets a voice-friendly speak target without the old 60-word cap", () => {
+    const prompt = buildAtlasSystemPrompt(NOW);
+
+    expect(prompt).toContain("usually under 100 words");
+    expect(prompt).not.toContain("under 60 words");
+  });
+
   test("keeps the news example on the search path", () => {
     const prompt = buildAtlasSystemPrompt(NOW);
 

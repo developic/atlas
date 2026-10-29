@@ -6,6 +6,7 @@
  * means editing two copies in the dashboard.
  */
 import { ORB_ERROR_CODES, type OrbErrorCode } from "./orb-errors";
+import type { LayoutPlan } from "./layout/layout-plan";
 import type { SourceLink } from "./source-links";
 
 /**
@@ -25,12 +26,18 @@ export type TurnEvent =
   | { status: "audio"; pcm: string; sampleRate: number; seq: number }
   | { status: "audio-done" }
   | { status: "audio-mp3"; audio: string }
+  | { status: "layout_plan"; plan: { version: 1; density: string; fallback: string; components: Array<{ id: string; kind: string; title?: string; priority: number; placement: string; minW: number; maxW: number | null; minH: number; essential: boolean }> } }
+  | { status: "layout_card"; card: LayoutPlan["components"][number] }
+  | { status: "layout_card_delta"; id: string; delta: string; append: "content" | "props" }
+  | { status: "layout_card_state"; id: string; state: "collapsed" | "preview" | "expanded" | "docked" | "fullscreen" }
+  | { status: "layout_update"; op: "reflow" | "replace" | "remove"; targetId: string; card?: LayoutPlan["components"][number] }
   | {
       status: "speaking";
       transcript: string;
       speak: string;
       conversation: string;
       sources?: SourceLink[];
+      layout?: LayoutPlan;
     }
   | { status: "error"; code: OrbErrorCode; message: string };
 
@@ -46,6 +53,11 @@ export type TurnStreamHandlers = {
   onAudioDone?: () => void;
   onAudioMp3?: (audio: string) => void;
   onSpeaking?: (event: SpeakingEvent) => void;
+  onLayoutPlan?: (plan: { version: 1; density: string; fallback: string; components: Array<{ id: string; kind: string; title?: string; priority: number; placement: string; minW: number; maxW: number | null; minH: number; essential: boolean }> }) => void;
+  onLayoutCard?: (card: LayoutPlan["components"][number]) => void;
+  onLayoutCardDelta?: (p: { id: string; delta: string; append: "content" | "props" }) => void;
+  onLayoutCardState?: (p: { id: string; state: "collapsed" | "preview" | "expanded" | "docked" | "fullscreen" }) => void;
+  onLayoutUpdate?: (p: { op: "reflow" | "replace" | "remove"; targetId: string; card?: LayoutPlan["components"][number] }) => void;
 };
 
 export class TurnStreamError extends Error {
@@ -112,6 +124,16 @@ function isTurnEvent(value: unknown): value is TurnEvent {
       );
     case "audio-mp3":
       return typeof event.audio === "string" && event.audio.length > 0;
+    case "layout_plan":
+      return typeof event.plan === "object" && event.plan !== null;
+    case "layout_card":
+      return typeof event.card === "object" && event.card !== null;
+    case "layout_card_delta":
+      return typeof event.id === "string" && typeof event.delta === "string";
+    case "layout_card_state":
+      return typeof event.id === "string" && typeof event.state === "string";
+    case "layout_update":
+      return typeof event.op === "string" && typeof event.targetId === "string";
     case "speaking":
       return (
         typeof event.transcript === "string" &&
@@ -184,6 +206,21 @@ export async function readTurnStream(
           break;
         case "audio-mp3":
           handlers.onAudioMp3?.(payload.audio);
+          break;
+        case "layout_plan":
+          handlers.onLayoutPlan?.(payload.plan as never);
+          break;
+        case "layout_card":
+          handlers.onLayoutCard?.(payload.card as never);
+          break;
+        case "layout_card_delta":
+          handlers.onLayoutCardDelta?.(payload as never);
+          break;
+        case "layout_card_state":
+          handlers.onLayoutCardState?.(payload as never);
+          break;
+        case "layout_update":
+          handlers.onLayoutUpdate?.(payload as never);
           break;
         case "speaking":
           finalEvent = payload;

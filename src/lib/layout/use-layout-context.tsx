@@ -6,6 +6,7 @@ import {
   computeAvailableSpace,
   getBreakpoint,
   getInputModality,
+  type InputModality,
   type LayoutContext,
 } from "./layout-context";
 import { useElementMeasure } from "./use-element-measure";

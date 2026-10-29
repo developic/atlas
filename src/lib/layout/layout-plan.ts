@@ -165,9 +165,9 @@ export function deriveFromTools(
     });
   }
 
-  // For each create tool result, make a ui card
+  // For each create tool result, make a ui card (cast to string to allow future tool)
   toolResults.forEach((tr, idx) => {
-    if (tr.request.tool === "create") {
+    if ((tr.request.tool as string) === "create") {
       const kind = (tr.request.arguments.kind as Kind) || "custom";
       const title = tr.request.arguments.title || kind;
       const propsRaw = tr.request.arguments.props || "{}";
@@ -200,9 +200,9 @@ export function deriveFromTools(
   });
 
   // If no ui cards but had websearch/webfetch, make a sources-like ui
-  if (components.filter((c) => c.kind === "ui").length === 0 && toolResults.some((tr) => tr.request.tool === "websearch" || tr.request.tool === "webfetch")) {
+  if (components.filter((c) => c.kind === "ui").length === 0 && toolResults.some((tr) => (tr.request.tool as string) === "websearch" || (tr.request.tool as string) === "webfetch")) {
     const searchRefs = toolResults
-      .map((tr, i) => (tr.request.tool === "websearch" || tr.request.tool === "webfetch" ? `${tr.request.tool}:${i}` : null))
+      .map((tr, i) => ((tr.request.tool as string) === "websearch" || (tr.request.tool as string) === "webfetch" ? `${tr.request.tool}:${i}` : null))
       .filter(Boolean) as string[];
     if (searchRefs.length > 0) {
       components.push({
@@ -210,7 +210,7 @@ export function deriveFromTools(
         kind: "custom",
         title: "Findings",
         content: toolResults
-          .filter((tr) => tr.request.tool !== "create")
+          .filter((tr) => (tr.request.tool as string) !== "create")
           .map((tr) => tr.result.content.slice(0, 500))
           .join("\n\n"),
         priority: 2,

@@ -1,5 +1,16 @@
 # Project Context
 
+## 2026-10-29 15:50 IST (10:20 UTC) — Adaptive Layout Intelligence v1
+
+- Implemented screen-aware adaptive layout engine: `src/lib/layout/{layout-context,use-layout-context,use-element-measure,layout-plan,layout-engine,density,ui,parse,stream}.ts` + `src/components/layout/{adaptive-container,adaptive-card,render,layout-orchestrator,use-layout-validation}.tsx`.
+- `LayoutContext` via ResizeObserver+visualViewport+matchMedia provides viewport/availableSpace/breakpoint/modality (xs/sm/md/lg/xl, pointer/touch/hybrid) — browser truth, no AI guessing.
+- `derivePlan`/`deriveFromTools` produce `LayoutPlan` (components with priority/placement/minW/maxW/essential/toolRefs/uiSchema) + `checkPlan` guard; `validatePlan`/`reflow` enforce collision/overflow/min-size/readability/accessibility, never drop essential, cascade condense→expandable→replace→reflow→scroll/paginate/fullscreen; `density` handles canFit/chooseDensity.
+- New tool `create` (`src/lib/tools/create.ts` + registry) lets AI create UI kinds (comparison_table/timeline/card_grid/stat/pricing_cards/checklist/kanban/chart/custom) validated via `src/lib/layout/ui.ts`.
+- Streaming protocol: 5 new `TurnEvent` statuses (`layout_plan/card/delta/state/update`) in `src/lib/turn-stream.ts` interleaved with speak-delta/audio on same NDJSON stream; skeleton pulse → card cross-fade, rAF batched, abort-safe; prompt appendix in `src/lib/atlas-prompt.ts` forces batch parallel tool use + create + streaming.
+- Dashboard wired: `src/app/dashboard/page.tsx` wraps in `AdaptiveContainer`, `src/components/dashboard/dashboard-flow.tsx` derives currentPlan from history and renders `LayoutOrchestrator` (stable keys, incremental diff, pinned persistence, dismiss/pin).
+- Verified: `bunx tsc --noEmit` clean, `bun run build` 7/7 static, `bun test tests/` 228 pass (new: layout-context/plan/density/engine/card/orchestrator/validation/stream/create/ui).
+- Tests added: `tests/layout-*.js`, `tests/create.test.js`, `tests/ui.test.js`.
+
 ## 2026-10-29 12:45 IST (07:15 UTC) — Make Baseten prompt caching reachable
 
 - `src/lib/atlas-prompt.ts`: `formatCurrentDate` no longer embeds a live clock or ISO instant. It keeps `dateStyle: "full"` with `timeZone: "UTC"`, so the first prompt block is stable for a whole UTC day. Previously the clock diverged within the first few tokens of every turn, so `cached_tokens` was effectively zero regardless of the affinity header.
@@ -520,3 +531,10 @@
 - Added a matching fetch example and an anti-loop rule: never ask the same clarifying question twice; if the user answers it, act on the answer and the earlier request, so a short follow-up like “info” continues the URL or topic they already gave.
 - The completed trace now follows the documented Trace composition: `TraceLine` sits inside `TraceCollapsibleTrigger`, and the external link announces “(opens in a new tab)” to screen readers.
 - Tests: extended `tests/atlas-prompt.test.js` for the URL example and anti-loop rules. `bun test tests/` (176 pass), `bunx tsc --noEmit --incremental false`, `bun run lint`, and `bun run build` pass.
+
+## 2026-10-29 13:25 IST (07:55 UTC) — Removed the spoken-reply character cap
+
+- Deleted `MAX_SPEAK_CHARS` (600). `normalizeTurn` no longer truncates `speak`, and the streaming path in `model.ts` computes `speak` deltas from the full field instead of a 600-character slice. `MAX_TRANSCRIPT_CHARS` (4,000) and `MAX_CONVERSATION_CHARS` (6,000) remain.
+- Renamed `trimForSpeech` to `normalizeSpeech`: it now only collapses whitespace and trims, so TTS receives the model's complete spoken text. The route applies it per sentence and to the final `speak`.
+- Updated the prompt's voice guidance from “one to three sentences, usually under 60 words” to “two to four complete sentences, usually under 100 words unless the user asks for detail.” The conversation hint now matches the enforced 6,000-character cap instead of the stale 4,000.
+- Tests: `orb-turn.test.js` now asserts a 2,000-character `speak` survives intact, whitespace is normalized without truncation, and `conversation` still caps at 6,000; `atlas-prompt.test.js` pins the new 100-word target and the absence of the old 60-word cap. `bun test tests/` (202 pass), `bunx tsc --noEmit --incremental false`, `bun run lint` (warnings only), and `bun run build` pass.

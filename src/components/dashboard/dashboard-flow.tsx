@@ -1,8 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { ConversationPanel } from "@/components/dashboard/conversation-panel";
 import { OrbCommandMenu, type OrbCommand } from "@/components/dashboard/orb-command-menu";
 import {
   mainLabelFor,
@@ -21,6 +20,9 @@ import {
   type ChatMessage,
 } from "@/lib/chat-message";
 import { ParticlesOrb } from "@/registry/orbe/particles-orb/particles-orb";
+import { LayoutOrchestrator } from "@/components/layout/layout-orchestrator";
+import { derivePlan } from "@/lib/layout/layout-plan";
+import { useLayoutContext } from "@/lib/layout/use-layout-context";
 
 const SESSION_KEY = "atlas-orb-session";
 /** Leave the speaker tail behind before listening again. */
@@ -93,16 +95,12 @@ export function DashboardFlow() {
   const [preview, setPreview] = useState<OrbPreview>("auto");
   const [progress, setProgress] = useState(0.5);
   const [orbSize, setOrbSize] = useState(360);
-  const [showConversation, setShowConversation] = useState(false);
-  /** A manual close stays closed for the rest of the session. */
-  const [conversationDismissed, setConversationDismissed] = useState(false);
 
   const {
     aiState,
     aiReply,
     aiError,
     aiAudio,
-    aiTool,
     respond,
     sendText,
     stopTurn,
@@ -173,18 +171,30 @@ export function DashboardFlow() {
   const orbState = orbStateFor({ aiState, mic: status, preview });
   const mainLabel = mainLabelFor(status);
 
-  /** The transcript opens itself once the first message lands (typed or spoken).
-   *  A manual close wins for the rest of the session.
-   *  Derived during render on purpose: this repo's ESLint flags setState in
-   *  effects and renders, so there is no effect watching history.length here.
-   */
-  const conversationOpen =
-    showConversation || (history.length > 0 && !conversationDismissed);
+  // Layout context may not be available during SSR or before provider mounts
+  let layoutContext: ReturnType<typeof useLayoutContext> | null = null;
+  try {
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    layoutContext = useLayoutContext();
+  } catch {
+    layoutContext = null;
+  }
 
-  const closeConversation = () => {
-    setShowConversation(false);
-    setConversationDismissed(true);
-  };
+  const lastAssistant = useMemo(() => [...history].reverse().find((m) => m.role === "assistant"), [history]);
+
+  const currentPlan = useMemo(() => {
+    if (!lastAssistant || !layoutContext) return null;
+    // Prefer layout from model if present (future), else derive
+    const rawLayout = (lastAssistant as unknown as { layout?: unknown }).layout;
+    if (rawLayout && typeof rawLayout === "object") {
+      // Will be validated by orchestrator; for now return as is if valid shape
+      try {
+        const { checkPlan } = require("@/lib/layout/layout-plan") as typeof import("@/lib/layout/layout-plan");
+        if (checkPlan(rawLayout)) return rawLayout as ReturnType<typeof derivePlan>;
+      } catch {}
+    }
+    return derivePlan(lastAssistant.content, lastAssistant.sources ?? [], (lastAssistant.tools as unknown as never) ?? [], layoutContext);
+  }, [lastAssistant, layoutContext]);
 
   useEffect(() => {
     if (!vadActive) {
@@ -319,11 +329,6 @@ export function DashboardFlow() {
 
   const commands: OrbCommand[] = [
     { label: mainLabel, run: handleMain, active: live },
-    {
-      label: showConversation ? "Hide conversation" : "Show conversation",
-      run: () => setShowConversation(!showConversation),
-      active: conversationOpen,
-    },
     ...PREVIEWS.map((option) => ({
       label: option.label,
       run: () => changePreview(option.value),
@@ -331,11 +336,14 @@ export function DashboardFlow() {
     })),
   ];
 
+  const orbRef = useRef<HTMLDivElement>(null);
+
   return (
     <div className="flex w-full max-w-md flex-col items-center">
       <h1 className="sr-only">Atlas orb. Press Control K for controls.</h1>
 
       <div
+        ref={orbRef}
         className="orb-stage-in relative isolate grid place-items-center"
         style={{ width: orbSize, height: orbSize }}
       >
@@ -391,6 +399,8 @@ export function DashboardFlow() {
 
       <OrbCommandMenu commands={commands} />
 
+      {currentPlan && layoutContext ? <LayoutOrchestrator plan={currentPlan} /> : null}
+
       {aiAudio ? (
         <audio
           ref={audioRef}
@@ -400,18 +410,6 @@ export function DashboardFlow() {
           className="hidden"
         />
       ) : null}
-
-      <ConversationPanel
-        history={history}
-        isOpen={conversationOpen}
-        onClose={closeConversation}
-        pending={
-          aiState === "thinking" || aiState === "searching" ? aiState : null
-        }
-        pendingTool={
-          aiState === "thinking" || aiState === "searching" ? aiTool : null
-        }
-      />
 
       <PromptDock onSendText={sendText} />
     </div>

@@ -2,13 +2,12 @@
  * Pure parsing and normalization for one orb turn.
  *
  * Kept apart from the transport so fixtures can cover malformed model output
- * without touching NVIDIA or Cartesia.
+ * without touching Baseten or Cartesia.
  */
 import { extractJsonObject } from "./json-extract";
 import { OrbError } from "./orb-errors";
 
 export const MAX_TRANSCRIPT_CHARS = 4_000;
-export const MAX_SPEAK_CHARS = 600;
 export const MAX_CONVERSATION_CHARS = 6_000;
 
 export type OmniTurn = {
@@ -18,32 +17,28 @@ export type OmniTurn = {
 };
 
 /**
- * Keep the spoken turn short, so TTS stays quick and the orb stays lively.
- * Prefer a complete sentence over slicing mid-word.
+ * Normalize spoken text for TTS.
+ *
+ * Length is a prompt choice, not a transport cap: the model's token limit
+ * bounds the reply, and the sentence chunker bounds each TTS request.
+ * Truncating here would silently cut a reply the user can see in the transcript.
  */
-export function trimForSpeech(text: string): string {
-  const clean = text.replace(/\s+/g, " ").trim();
-
-  if (clean.length <= MAX_SPEAK_CHARS) return clean;
-
-  const cut = clean.slice(0, MAX_SPEAK_CHARS);
-  const end = Math.max(
-    cut.lastIndexOf(". "),
-    cut.lastIndexOf("! "),
-    cut.lastIndexOf("? "),
-  );
-
-  return end > 200 ? cut.slice(0, end + 1) : `${cut.trim()}…`;
+export function normalizeSpeech(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 function stringField(
   record: Record<string, unknown>,
   key: string,
-  limit: number,
+  limit?: number,
 ): string {
   const value = record[key];
 
-  return typeof value === "string" ? value.trim().slice(0, limit) : "";
+  if (typeof value !== "string") return "";
+
+  const clean = value.trim();
+
+  return limit === undefined ? clean : clean.slice(0, limit);
 }
 
 /**
@@ -58,7 +53,7 @@ export function normalizeTurn(parsed: Record<string, unknown>): OmniTurn {
     "transcript",
     MAX_TRANSCRIPT_CHARS,
   );
-  let speak = stringField(parsed, "speak", MAX_SPEAK_CHARS);
+  let speak = stringField(parsed, "speak");
   let conversation = stringField(
     parsed,
     "conversation",
@@ -69,7 +64,7 @@ export function normalizeTurn(parsed: Record<string, unknown>): OmniTurn {
     throw new OrbError("no_reply", "The assistant returned no reply.");
   }
 
-  if (!speak) speak = trimForSpeech(conversation);
+  if (!speak) speak = normalizeSpeech(conversation);
   if (!conversation) conversation = speak;
 
   return { transcript, speak, conversation };

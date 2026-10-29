@@ -240,7 +240,7 @@ describe("parseNativeToolCalls", () => {
         id: "call_3",
         request: null,
         error:
-          'Unknown tool "delete_everything" or invalid arguments. Available tools: websearch, webfetch, get_current_time.',
+          'Unknown tool "delete_everything" or invalid arguments. Available tools: websearch, webfetch, get_current_time, create.',
       },
     ]);
   });

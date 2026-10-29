@@ -7,7 +7,7 @@ import type { SourceLink } from "../source-links";
 export const CITATION_INSTRUCTION =
   "Cite source URLs in conversation as markdown links whose label is the result title, not the URL.";
 
-export const ORB_TOOL_NAMES = ["websearch", "webfetch", "get_current_time"] as const;
+export const ORB_TOOL_NAMES = ["websearch", "webfetch", "get_current_time", "create"] as const;
 
 export type OrbToolName = (typeof ORB_TOOL_NAMES)[number];
 
@@ -16,6 +16,8 @@ export type ToolResult = {
   /** Search results behind this tool call, already titled by Exa. */
   sources: SourceLink[];
 };
+
+export type CreateResult = ToolResult & { schema?: import("../layout/ui").Schema };
 
 export type ToolParameter = {
   type: "string" | ["string", "null"];

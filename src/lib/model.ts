@@ -26,7 +26,6 @@ import type { ChatMessage } from "./chat-message";
 import { extractJsonValue } from "./json-extract";
 import { readStringField } from "./json-stream";
 import {
-  MAX_SPEAK_CHARS,
   MAX_TRANSCRIPT_CHARS,
   parseTurn,
   type OmniTurn as ParsedTurn,
@@ -926,7 +925,7 @@ async function streamCompletion(
 
       const speak = readStringField(content, "speak");
       if (speak && !announcingTool) {
-        const value = speak.value.slice(0, MAX_SPEAK_CHARS);
+        const value = speak.value;
 
         if (value.startsWith(lastSpeak)) {
           const deltaText = value.slice(lastSpeak.length);

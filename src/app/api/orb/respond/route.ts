@@ -17,7 +17,7 @@ import {
   type OmniTurn,
 } from "@/lib/model";
 import { isOrbError, OrbError, userMessageFor } from "@/lib/orb-errors";
-import { MAX_TRANSCRIPT_CHARS, trimForSpeech } from "@/lib/orb-turn";
+import { MAX_TRANSCRIPT_CHARS, normalizeSpeech } from "@/lib/orb-turn";
 import { createSentenceChunker } from "@/lib/sentence-chunker";
 import type { TurnEvent } from "@/lib/turn-stream";
 
@@ -99,7 +99,7 @@ export async function POST(request: Request) {
         let ttsFailure: unknown = null;
 
         const queueSentence = (sentence: string) => {
-          const text = trimForSpeech(sentence);
+          const text = normalizeSpeech(sentence);
 
           if (!text) return;
 
@@ -178,7 +178,7 @@ export async function POST(request: Request) {
 
         stage = "speak";
 
-        const spoken = trimForSpeech(turn.speak);
+        const spoken = normalizeSpeech(turn.speak);
         const final: TurnEvent = {
           status: "speaking",
           transcript: turn.transcript || input.transcript,
