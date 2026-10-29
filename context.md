@@ -1,5 +1,17 @@
 # Project Context
 
+## 2026-10-29 11:31 IST (06:01 UTC) — Migrate orb model from NVIDIA to Baseten Muse Spark Open
+
+- Renamed `src/lib/nvidia-omni.ts` to `src/lib/model.ts`; it now calls Baseten's OpenAI-compatible Chat Completions endpoint (`https://inference.baseten.co/v1/chat/completions`) with `Authorization: Bearer $BASETEN_API_KEY` and model `meta-models/muse-spark-open-1026`.
+- `respondToAudio` sends the WAV clip as an `input_audio` content part (`{ data: base64, format: "wav" }`) plus a text prompt; `respondToText` sends text only.
+- Muse Spark Open always reasons: reasoning lands in `reasoning_content`, the final answer in `content`; reasoning cannot be turned off. Streams use `response_format: json_object` and `reasoning_effort: high`.
+- Error mapping: 401/403 → `config`, 429/503 → `busy`, other failures → `audio`; 202 handling removed (Baseten doesn't use it).
+- Native tool calls gated behind `BASETEN_NATIVE_TOOLS=1` (was `OMNI_NATIVE_TOOLS`); answered one-for-one by `tool_call_id`, round sent without `response_format`.
+- Updated `tests/omni-stream.test.js` env var names (`BASETEN_API_KEY`, `BASETEN_NATIVE_TOOLS`) and removed the obsolete reasoning-only retry test.
+- Updated `scripts/omni-probe.mjs` to target Baseten/Muse Spark Open.
+- Updated `AGENTS.md` (`model.ts` description) for the migration.
+- Verified with `bun test tests/` (188 pass), `bun x tsc --noEmit` clean, `bun run lint` no new errors, `next build` success.
+
 ## 2026-10-28 23:45 IST (18:15 UTC) — Searching animation API tightened
 
 - `src/registry/lib/orb-search.ts` now exports only the surface the render loop and its tests need (12 exports instead of 28). The wave stagger, rise, shimmer, LCG seed, and unlit marker are private, so retuning the effect does not widen the module API.

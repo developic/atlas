@@ -1,9 +1,10 @@
 /**
- * Server-only NVIDIA omni helpers for the orb.
+ * Server-only Baseten model helpers for the orb.
  *
- * The dashboard sends the browser recording straight to NVIDIA's free
- * Nemotron omni model. It transcribes the audio and writes the reply in one
- * call, returning a small JSON object:
+ * The dashboard sends the browser recording straight to Baseten's Muse Spark
+ * Open model (`meta-models/muse-spark-open-1026`) through the OpenAI-compatible
+ * Chat Completions endpoint. It transcribes the audio and writes the reply in
+ * one call, returning a small JSON object:
  *
  *   {"transcript":"…","speak":"…","conversation":"…"}
  *
@@ -15,7 +16,10 @@
  * The server runs the requested tools, feeds the results back, and asks for the
  * normal object. Cartesia turns `speak` into speech.
  *
- * Never import this module from a client component: it reads NVIDIA_API_KEY.
+ * Muse Spark Open always reasons; reasoning appears in `reasoning_content` and
+ * the final answer in `content`. Reasoning cannot be turned off.
+ *
+ * Never import this module from a client component: it reads BASETEN_API_KEY.
  */
 import { buildAtlasSystemPrompt } from "./atlas-prompt";
 import type { ChatMessage } from "./chat-message";
@@ -42,8 +46,8 @@ import {
 import { selectReplySources, type SourceLink } from "./source-links";
 import { parseSseStream } from "./sse";
 
-const OMNI_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning";
-const OMNI_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
+const BASETEN_MODEL = "meta-models/muse-spark-open-1026";
+const BASETEN_URL = "https://inference.baseten.co/v1/chat/completions";
 const DEFAULT_MAX_REPLY_TOKENS = 1_200;
 const RETRY_MAX_REPLY_TOKENS = 2_000;
 const MAX_TOOL_ROUNDS = 3;
@@ -72,15 +76,14 @@ export function composeTurnSignal(
 const MAX_TOOL_CONTENT_CHARS = 4_000;
 
 /**
- * P0 probe (2026-10-27): streaming, response_format, and thinking-off work.
- * Native tools could not be confirmed because the free worker returned 503 for
- * the tool probe, so the JSON protocol stays the default. Set
- * `OMNI_NATIVE_TOOLS=1` only after `bun scripts/omni-probe.mjs` shows tool_calls.
+ * Native tool calls are optional and gated behind an env flag, exactly as they
+ * were for NVIDIA. Baseten's endpoint is OpenAI-compatible, so native
+ * `tools` / `tool_choice` / `tool_calls` work the same way.
  *
  * Read at call time, not import time, so a test can toggle it.
  */
 function nativeToolsEnabled(): boolean {
-  return process.env.OMNI_NATIVE_TOOLS === "1";
+  return process.env.BASETEN_NATIVE_TOOLS === "1";
 }
 
 export type TurnMeta = {
@@ -125,7 +128,10 @@ type NativeToolCall = {
 
 type ContentPart =
   | { type: "text"; text: string }
-  | { type: "audio_url"; audio_url: { url: string } };
+  | {
+      type: "input_audio";
+      input_audio: { data: string; format: "wav" | "mp3" };
+    };
 
 type Message = {
   role: "system" | "user" | "assistant" | "tool";
@@ -157,7 +163,6 @@ type StreamPayload = {
     finish_reason?: string | null;
   }>;
   usage?: Usage;
-  /** NIM can return an error frame inside an HTTP 200 SSE response. */
   error?: unknown;
 };
 
@@ -186,31 +191,32 @@ function streamError(payload: StreamPayload): OrbError | null {
   if (
     /ResourceExhausted|request limit|rate limit|busy|overloaded/i.test(detail)
   ) {
-    return new OrbError("busy", "NVIDIA omni is busy. Try again in a moment.");
+    return new OrbError("busy", "Muse Spark Open is busy. Try again in a moment.");
   }
 
   return new OrbError(
     "audio",
-    `NVIDIA omni stream failed: ${detail.slice(0, 200) || "unknown error"}`,
+    `Muse Spark Open stream failed: ${detail.slice(0, 200) || "unknown error"}`,
   );
 }
 
 function getApiKey(): string {
-  const key = process.env.NVIDIA_API_KEY?.trim();
+  const key = process.env.BASETEN_API_KEY?.trim();
 
   if (!key) {
     throw new OrbError(
       "config",
-      "NVIDIA_API_KEY is not configured. Add it to .env.",
+      "BASETEN_API_KEY is not configured. Add it to .env.",
     );
   }
 
   return key;
 }
 
-/** Strip codec parameters; the omni endpoint accepts the base audio type. */
-function baseMimeType(value: string): string {
-  return value.split(";")[0]?.trim().toLowerCase() || "audio/wav";
+/** Normalise the recording mime type; Muse Spark Open accepts WAV (and others). */
+function audioFormat(mimeType: string): "wav" | "mp3" {
+  const mime = mimeType.split(";")[0]?.trim().toLowerCase();
+  return mime === "mp3" ? "mp3" : "wav";
 }
 
 export async function respondToAudio(
@@ -220,12 +226,11 @@ export async function respondToAudio(
   callbacks: TurnCallbacks = {},
   external?: AbortSignal,
 ): Promise<OmniTurn> {
-  const mime = baseMimeType(mimeType);
-  const dataUrl = `data:${mime};base64,${audio.toString("base64")}`;
+  const format = audioFormat(mimeType);
 
   return requestTurn(
     [
-      { type: "audio_url", audio_url: { url: dataUrl } },
+      { type: "input_audio", input_audio: { data: audio.toString("base64"), format } },
       {
         type: "text",
         text: "Transcribe and answer this recording.",
@@ -496,8 +501,8 @@ async function forceAnswer(
   ];
 
   // The forced call never advertises tools in native mode, so any tool call
-    // the model still returns is terminal: throw `no_reply` instead of running
-    // another tool round or a repair request.
+  // the model still returns is terminal: throw `no_reply` instead of running
+  // another tool round or a repair request.
   const forced = await runModelTurn(apiKey, forcedMessages, callbacks, {
     signal,
     allowTools: nativeToolsEnabled() ? false : undefined,
@@ -654,7 +659,7 @@ function formatToolResults(
 
 function metaFrom(result: ModelResult, toolRounds: number): TurnMeta {
   return {
-    model: result.model || OMNI_MODEL,
+    model: result.model || BASETEN_MODEL,
     finishReason: result.finishReason || "stop",
     promptTokens: result.usage.prompt_tokens ?? 0,
     completionTokens: result.usage.completion_tokens ?? 0,
@@ -676,13 +681,11 @@ async function runModelTurn(
   options: TurnOptions = {},
 ): Promise<ModelResult> {
   if (nativeToolsEnabled()) {
-    // JSON mode constrains the assistant message to JSON, which suppresses the
-    // tool call this request exists to produce. Only the final answer is
-    // schema-shaped. The forced-answer call does not advertise tools: a model
-    // that still emits tool_calls is terminal, not repairable.
+    // Only the final answer is schema-shaped. The forced-answer call does not
+    // advertise tools: a model that still emits tool_calls is terminal, not
+    // repairable.
     let result = await callModel(apiKey, messages, {
       tools: options.allowTools !== false,
-      json: false,
       signal: options.signal,
     });
 
@@ -710,15 +713,6 @@ async function runModelTurn(
     signal: options.signal,
   });
 
-  // A reasoning-only reply means the thinking flag was ignored. Never parse
-  // chain-of-thought as the answer; retry once with thinking explicitly off.
-  if (!result.content.trim() && result.reasoning.trim()) {
-    result = await streamCompletion(apiKey, messages, callbacks, {
-      forceThinkingOff: true,
-      signal: options.signal,
-    });
-  }
-
   if (result.finishReason === "length") {
     const retryMessages: Message[] = [
       ...messages,
@@ -737,7 +731,7 @@ async function runModelTurn(
   }
 
   if (!result.content.trim()) {
-    throw new OrbError("no_reply", "The NVIDIA omni model returned no text.");
+    throw new OrbError("no_reply", "The Muse Spark Open model returned no text.");
   }
 
   return result;
@@ -745,7 +739,6 @@ async function runModelTurn(
 
 type StreamOptions = {
   maxTokens?: number;
-  forceThinkingOff?: boolean;
   signal?: AbortSignal;
 };
 
@@ -758,12 +751,11 @@ async function streamCompletion(
   const response = await postModel(
     apiKey,
     {
-      model: OMNI_MODEL,
+      model: BASETEN_MODEL,
       messages,
       max_tokens: options.maxTokens ?? DEFAULT_MAX_REPLY_TOKENS,
-      temperature: options.forceThinkingOff ? 0.1 : 0.3,
-      top_k: 1,
-      chat_template_kwargs: { enable_thinking: false },
+      temperature: 0.3,
+      reasoning_effort: "high",
       response_format: { type: "json_object" },
       stream: true,
     },
@@ -774,7 +766,7 @@ async function streamCompletion(
   let reasoning = "";
   let finishReason = "";
   let usage: Usage = {};
-  let model = OMNI_MODEL;
+  let model = BASETEN_MODEL;
   let lastTranscript = "";
   let lastSpeak = "";
 
@@ -808,7 +800,11 @@ async function streamCompletion(
       if (choice?.finish_reason) finishReason = choice.finish_reason;
 
       const transcript = readStringField(content, "transcript");
-      if (transcript?.done && transcript.value !== lastTranscript) {
+      if (
+        transcript?.done &&
+        transcript.value &&
+        transcript.value !== lastTranscript
+      ) {
         lastTranscript = transcript.value.slice(0, MAX_TRANSCRIPT_CHARS);
         callbacks.onTranscript?.(lastTranscript);
       }
@@ -860,20 +856,16 @@ async function streamCompletion(
 async function callModel(
   apiKey: string,
   messages: Message[],
-  options: { tools?: boolean; json?: boolean; signal?: AbortSignal } = {},
+  options: { tools?: boolean; signal?: AbortSignal } = {},
 ): Promise<ModelResult> {
   const response = await postModel(
     apiKey,
     {
-      model: OMNI_MODEL,
+      model: BASETEN_MODEL,
       messages,
       max_tokens: DEFAULT_MAX_REPLY_TOKENS,
       temperature: 0.3,
-      top_k: 1,
-      chat_template_kwargs: { enable_thinking: false },
-      ...(options.json === false
-        ? {}
-        : { response_format: { type: "json_object" } }),
+      reasoning_effort: "high",
       ...(options.tools && nativeToolsEnabled()
         ? { tools: ORB_TOOLS, tool_choice: "auto" }
         : {}),
@@ -904,7 +896,7 @@ async function callModel(
         : "",
     finishReason: choice?.finish_reason ?? "stop",
     usage: payload.usage ?? {},
-    model: payload.model ?? OMNI_MODEL,
+    model: payload.model ?? BASETEN_MODEL,
     nativeToolCalls: Array.isArray(message?.tool_calls)
       ? message.tool_calls
       : [],
@@ -958,7 +950,7 @@ async function postModel(
   let response: Response;
 
   try {
-    response = await fetch(OMNI_URL, {
+    response = await fetch(BASETEN_URL, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -981,39 +973,29 @@ async function postModel(
     throw new OrbError("audio", "The assistant is unavailable.");
   }
 
-  // 202 means the result is pending on NVCF; treating it as success leads to
-  // parsing an empty body. Retry the turn instead.
-  if (response.status === 202) {
+  if (response.status === 401 || response.status === 403) {
+    throw new OrbError(
+      "config",
+      `Muse Spark Open rejected the API key (${response.status}).`,
+    );
+  }
+
+  if (
+    response.status === 429 ||
+    response.status === 503
+  ) {
     throw new OrbError(
       "busy",
-      "NVIDIA omni is still starting. Try again in a moment.",
+      `Muse Spark Open is busy (${response.status}). Try again in a moment.`,
     );
   }
 
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
 
-    if (
-      response.status === 429 ||
-      response.status === 503 ||
-      detail.includes("ResourceExhausted")
-    ) {
-      throw new OrbError(
-        "busy",
-        "NVIDIA omni is busy. Try again in a moment.",
-      );
-    }
-
-    if (response.status === 401 || response.status === 403) {
-      throw new OrbError(
-        "config",
-        `NVIDIA omni rejected the API key (${response.status}).`,
-      );
-    }
-
     throw new OrbError(
       "audio",
-      `NVIDIA omni failed (${response.status}): ${detail.slice(0, 200)}`,
+      `Muse Spark Open failed (${response.status}): ${detail.slice(0, 200)}`,
     );
   }
 

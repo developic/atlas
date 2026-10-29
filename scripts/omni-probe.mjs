@@ -1,5 +1,5 @@
 /**
- * Probe the free NVIDIA Nemotron omni endpoint before relying on optional
+ * Probe the Baseten Muse Spark Open endpoint before relying on optional
  * request fields.
  *
  *   bun scripts/omni-probe.mjs
@@ -9,22 +9,22 @@
  *   2. stream: true (first three SSE frames)
  *   3. tools + tool_choice (strict schema, same shape the app sends)
  *   4. response_format: json_object
- *   5. enable_thinking false vs omitted
- *   6. a generated 16 kHz WAV via audio_url and input_audio
+ *   5. reasoning_effort high vs omitted
+ *   6. a generated 16 kHz WAV via input_audio
  *   7. response_format: json_schema (evidence for schema mode)
  *
  * Exits non-zero only when the baseline request fails, so the probe is safe to
  * run while the rest of the app is being upgraded.
  */
 
-const URL = "https://integrate.api.nvidia.com/v1/chat/completions";
-const MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning";
+const URL = "https://inference.baseten.co/v1/chat/completions";
+const MODEL = "meta-models/muse-spark-open-1026";
 const TIMEOUT_MS = 60_000;
 
-const key = process.env.NVIDIA_API_KEY?.trim();
+const key = process.env.BASETEN_API_KEY?.trim();
 
 if (!key) {
-  console.error("NVIDIA_API_KEY is not set. Add it to .env and re-run.");
+  console.error("BASETEN_API_KEY is not set. Add it to .env and re-run.");
   process.exit(1);
 }
 
@@ -126,8 +126,7 @@ async function main() {
       messages: textMessages,
       max_tokens: 200,
       temperature: 0.2,
-      top_k: 1,
-      chat_template_kwargs: { enable_thinking: false },
+      reasoning_effort: "high",
       response_format: { type: "json_object" },
     });
     const payload = await readJson(response);
@@ -147,8 +146,7 @@ async function main() {
       messages: textMessages,
       max_tokens: 200,
       temperature: 0.2,
-      top_k: 1,
-      chat_template_kwargs: { enable_thinking: false },
+      reasoning_effort: "high",
       stream: true,
     });
 
@@ -196,7 +194,7 @@ async function main() {
       ],
       max_tokens: 200,
       temperature: 0.2,
-      chat_template_kwargs: { enable_thinking: false },
+      reasoning_effort: "high",
       tools: [
         {
           type: "function",
@@ -237,7 +235,7 @@ async function main() {
       messages: textMessages,
       max_tokens: 120,
       temperature: 0.2,
-      chat_template_kwargs: { enable_thinking: false },
+      reasoning_effort: "high",
       response_format: { type: "json_object" },
     });
     const payload = await readJson(response);
@@ -249,10 +247,10 @@ async function main() {
     console.error(error);
   }
 
-  // 5. Thinking flag.
-  log("5. enable_thinking false vs omitted");
-  for (const [label, kwargs] of [
-    ["off", { enable_thinking: false }],
+  // 5. Reasoning effort.
+  log("5. reasoning_effort high vs omitted");
+  for (const [label, effort] of [
+    ["high", "high"],
     ["omitted", undefined],
   ]) {
     try {
@@ -260,7 +258,7 @@ async function main() {
         messages: textMessages,
         max_tokens: 120,
         temperature: 0.2,
-        ...(kwargs ? { chat_template_kwargs: kwargs } : {}),
+        ...(effort ? { reasoning_effort: effort } : {}),
       });
       const payload = await readJson(response);
       const content = contentOf(payload);
@@ -273,49 +271,41 @@ async function main() {
     }
   }
 
-  // 6. Audio shapes.
-  log("6. generated 16 kHz WAV via audio_url and input_audio");
+  // 6. Audio shape.
+  log("6. generated 16 kHz WAV via input_audio");
   const wav = makeWav();
 
-  for (const [label, part] of [
-    [
-      "audio_url",
-      { type: "audio_url", audio_url: { url: `data:audio/wav;base64,${wav}` } },
-    ],
-    ["input_audio", { type: "input_audio", input_audio: { data: wav, format: "wav" } }],
-  ]) {
-    try {
-      const response = await post({
-        messages: [
-          {
-            role: "system",
-            content:
-              'Transcribe the clip and answer. Return only {"transcript":"...","speak":"...","conversation":"..."}.',
-          },
-          {
-            role: "user",
-            content: [
-              part,
-              {
-                type: "text",
-                text: "Transcribe and answer this recording. Return only the JSON object.",
-              },
-            ],
-          },
-        ],
-        max_tokens: 200,
-        temperature: 0.2,
-        chat_template_kwargs: { enable_thinking: false },
-        response_format: { type: "json_object" },
-      });
-      const payload = await readJson(response);
+  try {
+    const response = await post({
+      messages: [
+        {
+          role: "system",
+          content:
+            'Transcribe the clip and answer. Return only {"transcript":"...","speak":"...","conversation":"..."}.',
+        },
+        {
+          role: "user",
+          content: [
+            { type: "input_audio", input_audio: { data: wav, format: "wav" } },
+            {
+              type: "text",
+              text: "Transcribe and answer this recording. Return only the JSON object.",
+            },
+          ],
+        },
+      ],
+      max_tokens: 200,
+      temperature: 0.2,
+      reasoning_effort: "high",
+      response_format: { type: "json_object" },
+    });
+    const payload = await readJson(response);
 
-      console.log(`\n${label}: status ${response.status}`);
-      console.log(JSON.stringify(contentOf(payload)).slice(0, 500));
-      console.log(preview(payload?.raw));
-    } catch (error) {
-      console.error(`${label}:`, error);
-    }
+    console.log(`\ninput_audio: status ${response.status}`);
+    console.log(JSON.stringify(contentOf(payload)).slice(0, 500));
+    console.log(preview(payload?.raw));
+  } catch (error) {
+    console.error(`input_audio:`, error);
   }
 
   // 7. response_format: json_schema (Structured Outputs subset).
@@ -329,7 +319,7 @@ async function main() {
         { role: "user", content: "Name one fruit." },
       ],
       max_tokens: 120,
-      chat_template_kwargs: { enable_thinking: false },
+      reasoning_effort: "high",
       response_format: {
         type: "json_schema",
         json_schema: {

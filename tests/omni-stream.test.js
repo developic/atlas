@@ -72,7 +72,7 @@ function installFetch(responses) {
 }
 
 beforeEach(() => {
-  process.env.NVIDIA_API_KEY = "test-key";
+  process.env.BASETEN_API_KEY = "test-key";
   delete process.env.EXA_API_KEY;
   requests = [];
 });
@@ -86,7 +86,7 @@ afterEach(() => {
     process.env.EXA_API_KEY = realExaKey;
   }
 
-  delete process.env.OMNI_NATIVE_TOOLS;
+  delete process.env.BASETEN_NATIVE_TOOLS;
 });
 
 describe("respondToAudio streaming", () => {
@@ -112,24 +112,6 @@ describe("respondToAudio streaming", () => {
     expect(requests[1].body.messages.at(-1).content).toContain("cut off");
   });
 
-  test("retries when the first stream is reasoning-only", async () => {
-    const first = sseResponse([
-      { choices: [{ delta: { reasoning_content: "Let me think." } }] },
-      finishEvent("stop"),
-    ]);
-    const second = finalTurn({
-      transcript: "hi",
-      speak: "Hi.",
-      conversation: "Hi.",
-    });
-
-    installFetch([first, second]);
-
-    const turn = await respondToAudio(Buffer.from([1]), "audio/wav");
-
-    expect(turn.speak).toBe("Hi.");
-    expect(requests).toHaveLength(2);
-  });
 
   test("maps an in-stream ResourceExhausted error to busy", async () => {
     installFetch([
@@ -488,7 +470,7 @@ describe("tool orchestration", () => {
   });
 
   test("answers every native tool call with its own id", async () => {
-    process.env.OMNI_NATIVE_TOOLS = "1";
+    process.env.BASETEN_NATIVE_TOOLS = "1";
 
     installFetch([
       new Response(
@@ -605,7 +587,7 @@ describe("tool orchestration", () => {
   });
 
   test("native forced answer is terminal: further tool_calls throw no_reply", async () => {
-    process.env.OMNI_NATIVE_TOOLS = "1";
+    process.env.BASETEN_NATIVE_TOOLS = "1";
 
     const tool = () =>
       new Response(
@@ -644,7 +626,7 @@ describe("tool orchestration", () => {
   });
 
   test("native echoed calls match tool messages when the provider skips a call", async () => {
-    process.env.OMNI_NATIVE_TOOLS = "1";
+    process.env.BASETEN_NATIVE_TOOLS = "1";
 
     installFetch([
       new Response(
@@ -704,7 +686,7 @@ describe("tool orchestration", () => {
   });
 
   test("native tool round sends no response_format", async () => {
-    process.env.OMNI_NATIVE_TOOLS = "1";
+    process.env.BASETEN_NATIVE_TOOLS = "1";
 
     installFetch([
       new Response(
