@@ -11,6 +11,7 @@ import {
 } from "@/lib/cartesia-server";
 import { parseHistory, type ChatMessage } from "@/lib/chat-message";
 import {
+  normalizeSession,
   respondToAudio,
   respondToText,
   type OmniTurn,
@@ -353,13 +354,9 @@ async function readRequest(request: Request): Promise<TurnInput> {
 
 /**
  * The affinity key is a routing hint, not conversation content. Anything that
- * is not a short string is dropped so a malformed client cannot put arbitrary
- * text into a request header.
+ * is not a short, header-safe string is dropped so a malformed client cannot
+ * put arbitrary text into a request header.
  */
 function readSession(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-
-  const session = value.trim().slice(0, 64);
-
-  return session || undefined;
+  return normalizeSession(typeof value === "string" ? value : undefined);
 }

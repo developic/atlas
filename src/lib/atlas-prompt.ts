@@ -90,11 +90,20 @@ Output: {"tool":"webfetch","arguments":{"url":"https://ui.shadcn.com/docs/compon
 
 Never replace a tool request with "I'm checking", "I'm looking up", "let me find", or "I don't have access to current information". The tool request is the action.`;
 
+/**
+ * The date is deliberately day-granular, not second-granular.
+ *
+ * This block is the first thing in the system prompt, and Baseten's prompt
+ * cache matches a prefix of tokens: a live clock here would make the prefix
+ * diverge within the first few tokens and force every turn to re-process the
+ * whole prompt. A date that only changes at UTC midnight keeps the prompt
+ * stable for a whole day. Anything that needs the actual time asks
+ * `get_current_time`, which still returns the full clock and ISO instant.
+ */
 function formatCurrentDate(now: Date): string {
   const full = new Intl.DateTimeFormat("en-US", {
     timeZone: "UTC",
     dateStyle: "full",
-    timeStyle: "long",
   }).format(now);
 
   const month = new Intl.DateTimeFormat("en-US", {
@@ -104,7 +113,7 @@ function formatCurrentDate(now: Date): string {
   }).format(now);
 
   return [
-    `Today is ${full} (${now.toISOString()}).`,
+    `Today is ${full}.`,
     `The current month is ${month}. Your training data ends before today, so you do not know this month's news.`,
     "A date the user names that is on or before today is present or past, never future.",
   ].join("\n");

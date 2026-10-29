@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import { respondToAudio, respondToText, composeTurnSignal, TURN_BUDGET_MS } from "../src/lib/model.ts";
+import {
+  composeTurnSignal,
+  normalizeSession,
+  respondToAudio,
+  respondToText,
+  TURN_BUDGET_MS,
+} from "../src/lib/model.ts";
 
 const realFetch = globalThis.fetch;
 const realExaKey = process.env.EXA_API_KEY;
@@ -1005,6 +1011,24 @@ describe("Muse Spark Open request shape", () => {
     expect(requests[0].headers["x-session-affinity"]).toBeUndefined();
   });
 
+  test("sanitizes control and non-ASCII characters out of the affinity key", () => {
+    expect(normalizeSession("  session-abc  ")).toBe("session-abc");
+    expect(normalizeSession("abc\r\ndef\u0000ghi\u007f")).toBe("abcdefghi");
+    expect(normalizeSession("séssion-🚀")).toBe("sssion-");
+    expect(normalizeSession(" \r\n ")).toBeUndefined();
+    expect(normalizeSession(undefined)).toBeUndefined();
+  });
+
+  test("sends a sanitized affinity key instead of failing the request", async () => {
+    installFetch([
+      finalTurn({ transcript: "hi", speak: "Hi.", conversation: "Hi." }),
+    ]);
+
+    await respondToText("hi", [], {}, { session: "abc\r\nDEF" });
+
+    expect(requests[0].headers["x-session-affinity"]).toBe("abcDEF");
+  });
+
   test("reports cached, audio, and reasoning tokens from the usage frame", async () => {
     installFetch([
       sseResponse([
@@ -1034,6 +1058,59 @@ describe("Muse Spark Open request shape", () => {
     expect(turn.meta.cachedTokens).toBe(900);
     expect(turn.meta.audioTokens).toBe(120);
     expect(turn.meta.reasoningTokens).toBe(30);
+  });
+
+  test("defaults every usage field to zero when the frame is empty", async () => {
+    installFetch([
+      sseResponse([
+        contentEvent(
+          JSON.stringify({
+            transcript: "hi",
+            speak: "Hi.",
+            conversation: "Hi.",
+          }),
+        ),
+        { choices: [], usage: {} },
+        finishEvent("stop"),
+      ]),
+    ]);
+
+    const turn = await respondToText("hi");
+
+    expect(turn.meta.promptTokens).toBe(0);
+    expect(turn.meta.cachedTokens).toBe(0);
+    expect(turn.meta.audioTokens).toBe(0);
+    expect(turn.meta.completionTokens).toBe(0);
+    expect(turn.meta.reasoningTokens).toBe(0);
+  });
+
+  test("keeps earlier usage counts when a later frame is partial", async () => {
+    installFetch([
+      sseResponse([
+        contentEvent(
+          JSON.stringify({
+            transcript: "hi",
+            speak: "Hi.",
+            conversation: "Hi.",
+          }),
+        ),
+        {
+          choices: [],
+          usage: {
+            prompt_tokens: 1_000,
+            prompt_tokens_details: { cached_tokens: 900 },
+          },
+        },
+        { choices: [], usage: { completion_tokens: 50 } },
+        finishEvent("stop"),
+      ]),
+    ]);
+
+    const turn = await respondToText("hi");
+
+    expect(turn.meta.promptTokens).toBe(1_000);
+    expect(turn.meta.cachedTokens).toBe(900);
+    expect(turn.meta.completionTokens).toBe(50);
   });
 
   test("maps 529 capacity shedding to a retryable busy error", async () => {

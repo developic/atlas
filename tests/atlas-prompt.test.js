@@ -15,6 +15,28 @@ describe("buildAtlasSystemPrompt", () => {
     expect(prompt).toContain("never future");
   });
 
+  test("keeps the cacheable prompt identical within one UTC day", () => {
+    const early = buildAtlasSystemPrompt(new Date("2026-10-27T00:00:01.000Z"));
+    const late = buildAtlasSystemPrompt(new Date("2026-10-27T23:59:59.000Z"));
+
+    expect(early).toBe(late);
+  });
+
+  test("rolls the date over at UTC midnight", () => {
+    const before = buildAtlasSystemPrompt(new Date("2026-10-27T23:59:59.000Z"));
+    const after = buildAtlasSystemPrompt(new Date("2026-10-28T00:00:00.000Z"));
+
+    expect(before).not.toBe(after);
+    expect(after).toContain("Today is Wednesday, October 28, 2026.");
+  });
+
+  test("keeps the live clock out of the prompt prefix", () => {
+    const prompt = buildAtlasSystemPrompt(NOW);
+
+    expect(prompt.split("\n")[1]).toBe("Today is Tuesday, October 27, 2026.");
+    expect(prompt).not.toContain("2026-10-27T12:00:00.000Z");
+  });
+
   test("defines both reply shapes and the final search check", () => {
     const prompt = buildAtlasSystemPrompt(NOW);
 

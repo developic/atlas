@@ -16,7 +16,7 @@ in-memory SSE responses, so no Baseten, Exa, or Cartesia call is made.
 | `exa-search.test.js` | Exa result compaction and the JSON `websearch` request shape |
 | `orb-tools.test.js` | Tool registry, nested/flat JSON requests, classification with partial invalid calls, per-argument caps, per-id native calls, `runToolWithSources`, fetch fencing |
 | `web-fetch.test.js` | URL validation and private-host blocking, HTML extraction, focus selection, fetch success, redirect, 404, unsupported type, oversize, timeout |
-| `atlas-prompt.test.js` | Injected date, reply shapes, the news/search example, and the fetch branch |
+| `atlas-prompt.test.js` | Injected date, UTC-day prompt stability and midnight rollover, no live clock in the prefix, reply shapes, the news/search example, and the fetch branch |
 | `sse.test.js` | SSE chunk splitting, CRLF, multi-line frames, `[DONE]`, incremental JSON fields |
 | `speech.test.js` | Sentence chunker boundaries, PCM16 scheduling math, Cartesia request shape and failures |
 | `history.test.js` | `parseHistory`/`toModelHistory` validation, tool-trace validation, and character-budget trimming that keeps user/assistant pairs |
@@ -26,7 +26,7 @@ in-memory SSE responses, so no Baseten, Exa, or Cartesia call is made.
 | `orb-reveal.test.js` | When held audio, MP3, or an error reveals the reply text |
 | `orb-search.test.js` | Searching constellation ranks, scan band sweep/falloff, staggered reveal, dot/alpha gains |
 | `turn-stream.test.js` | `TurnEvent` boundary validation, tool detail/query dispatch, NDJSON event dispatch, typed errors, truncated streams |
-| `omni-stream.test.js` | Streamed model output, request shape (reasoning depth, usage frames, session affinity), cached/audio/reasoning token reporting, status mapping (429/503/529 busy, 402/401 config), truncation retries, in-stream busy errors, tool orchestration (correction, round cap, repair with evidence, native ids, duplicate searches, turn deadline, search→fetch, partial failures, cross-round dedupe, tool cancellation) |
+| `omni-stream.test.js` | Streamed model output, request shape (reasoning depth, usage frames, session affinity), session sanitization (control/non-ASCII characters), cached/audio/reasoning token reporting and missing/partial usage defaults, status mapping (429/503/529 busy, 402/401 config), truncation retries, in-stream busy errors, tool orchestration (correction, round cap, repair with evidence, native ids, duplicate searches, turn deadline, search→fetch, partial failures, cross-round dedupe, tool cancellation) |
 
 ## Probe
 

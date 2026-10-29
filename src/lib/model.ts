@@ -142,9 +142,19 @@ type TurnRun = {
   session?: string;
 };
 
-/** Trim a client-supplied affinity id; anything unusable falls back to no header. */
-function normalizeSession(session?: string): string | undefined {
-  const value = session?.trim().slice(0, MAX_SESSION_CHARS);
+/**
+ * Turn a client-supplied affinity id into a header-safe value.
+ *
+ * The id ends up in an HTTP header, so only printable ASCII survives: control
+ * characters make `fetch` throw, and non-ASCII code points are not valid in a
+ * ByteString header value. A value that sanitizes to nothing is dropped
+ * rather than sent, so caching degrades instead of the turn failing.
+ */
+export function normalizeSession(session?: string): string | undefined {
+  const value = session
+    ?.replace(/[^\x20-\x7E]/g, "")
+    .trim()
+    .slice(0, MAX_SESSION_CHARS);
 
   return value ? value : undefined;
 }
@@ -728,6 +738,41 @@ function metaFrom(result: ModelResult, toolRounds: number): TurnMeta {
   };
 }
 
+/**
+ * Fold a usage frame into what the stream has already reported.
+ *
+ * `include_usage` normally sends one complete frame at the end, but a partial
+ * or empty object must not erase a count that arrived earlier. Only defined
+ * numbers overwrite, and `metaFrom` still defaults every missing field to 0.
+ */
+function mergeUsage(base: Usage, next: Usage): Usage {
+  const prompt = next.prompt_tokens_details;
+  const completion = next.completion_tokens_details;
+
+  return {
+    prompt_tokens: next.prompt_tokens ?? base.prompt_tokens,
+    completion_tokens: next.completion_tokens ?? base.completion_tokens,
+    prompt_tokens_details:
+      prompt || base.prompt_tokens_details
+        ? {
+            cached_tokens:
+              prompt?.cached_tokens ??
+              base.prompt_tokens_details?.cached_tokens,
+            audio_tokens:
+              prompt?.audio_tokens ?? base.prompt_tokens_details?.audio_tokens,
+          }
+        : undefined,
+    completion_tokens_details:
+      completion || base.completion_tokens_details
+        ? {
+            reasoning_tokens:
+              completion?.reasoning_tokens ??
+              base.completion_tokens_details?.reasoning_tokens,
+          }
+        : undefined,
+  };
+}
+
 type TurnOptions = {
   /** When false in native mode, the forced-answer call drops `tools` so a
    * model that still emits `tool_calls` cannot hide behind them. */
@@ -846,7 +891,7 @@ async function streamCompletion(
       if (streamFailure) throw streamFailure;
 
       if (typeof payload.model === "string") model = payload.model;
-      if (payload.usage) usage = payload.usage;
+      if (payload.usage) usage = mergeUsage(usage, payload.usage);
 
       const choice = payload.choices?.[0];
       const delta = choice?.delta ?? choice?.message;

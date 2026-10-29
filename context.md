@@ -1,5 +1,17 @@
 # Project Context
 
+## 2026-10-29 12:45 IST (07:15 UTC) — Make Baseten prompt caching reachable
+
+- `src/lib/atlas-prompt.ts`: `formatCurrentDate` no longer embeds a live clock or ISO instant. It keeps `dateStyle: "full"` with `timeZone: "UTC"`, so the first prompt block is stable for a whole UTC day. Previously the clock diverged within the first few tokens of every turn, so `cached_tokens` was effectively zero regardless of the affinity header.
+- Exact time is unchanged: `get_current_time` still returns the full date, time, and ISO instant on demand.
+- `src/lib/model.ts`: `normalizeSession` is exported and strips everything outside printable ASCII (`\x20`–`\x7E`) before the 64-character cap, so control characters and non-ASCII values can no longer make the `x-session-affinity` header throw. Empty results drop the header instead of failing the turn.
+- `src/app/api/orb/respond/route.ts`: `readSession` now delegates to `normalizeSession`, so the route and the model share one sanitizer.
+- Usage handling: `mergeUsage` folds streaming usage frames together, so a later partial or empty object cannot erase an earlier `prompt_tokens_details`. `metaFrom` still defaults every missing count to 0. `cachedTokens` remains logged in the `orb-turn` line.
+- `AGENTS.md` corrected: affinity is described as best-effort routing that may improve cache reuse, not a reserved replica, guaranteed hit, or guaranteed cached rate. The date prompt and `trimHistory`'s effect on prefix reuse are documented.
+- Tests: `tests/atlas-prompt.test.js` gains UTC-day stability, midnight rollover, and no-clock-in-prefix cases; `tests/omni-stream.test.js` gains session sanitization (direct and through the request header), empty-usage defaults, and partial-frame merging.
+- Verified: `bun x tsc --noEmit` clean, `bun test tests/` 201 pass / 0 fail, lint has no new errors, `next build` succeeds.
+- Remaining uncertainty: whether Baseten actually reports cache hits for this model/endpoint combination is only observable from the `cachedTokens` log; the docs describe affinity as best effort, not a guarantee.
+
 ## 2026-10-29 12:22 IST (06:52 UTC) — Muse Spark Open: cheapest reasoning depth plus every cost and usage lever
 
 - `src/lib/model.ts` now pins `reasoning_effort: "low"` on both the streaming and non-streaming paths. Muse Spark Open always reasons and cannot be switched off; its default depth is `xhigh`, and reasoning tokens bill as output at $4.25/M, so a one-to-three-sentence voice reply was paying for thinking it never used.
