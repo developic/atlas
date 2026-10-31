@@ -1,118 +1,120 @@
 "use client";
 
-import { useState } from "react";
-import { ChevronDown, X, Pin } from "lucide-react";
-import type { PlannedComponent } from "@/lib/layout/layout-plan";
-import type { LayoutContext } from "@/lib/layout/layout-context";
+import { ChevronDown } from "lucide-react";
 
-export type CardState = "collapsed" | "preview" | "expanded" | "docked" | "fullscreen";
-
-export function nextCardState(current: CardState, action: "hover" | "activate" | "collapse" | "pin" | "dock" | "fullscreen", modality: string): CardState {
-  if (action === "hover") {
-    if (modality === "touch") return current;
-    if (current === "collapsed") return "preview";
-    return current;
-  }
-  if (action === "activate") {
-    if (current === "collapsed" || current === "preview") return "expanded";
-    return current;
-  }
-  if (action === "collapse") return "collapsed";
-  if (action === "pin") return "docked";
-  if (action === "dock") return "docked";
-  if (action === "fullscreen") return "fullscreen";
-  return current;
-}
-
-export function shouldUseDrawer(breakpoint: string): boolean {
-  return breakpoint === "xs" || breakpoint === "sm";
-}
+import { InteractiveMarkdown } from "@/components/dashboard/interactive-markdown";
+import type { CardContent } from "@/lib/cards";
+import { plainTextFromMarkdown } from "@/lib/interactive-markdown";
+import { cn } from "@/lib/utils";
 
 type AdaptiveCardProps = {
-  component: PlannedComponent;
-  context?: LayoutContext;
-  state?: CardState;
-  onExpand?: (id: string) => void;
-  onCollapse?: (id: string) => void;
-  onDismiss?: (id: string) => void;
-  onPin?: (id: string) => void;
+  card: CardContent;
+  open: boolean;
+  onToggle: () => void;
+  /** Opens this card when the pointer moves over it, so hover replaces the click. */
+  onHover?: () => void;
+  className?: string;
 };
 
-export function AdaptiveCard({ component, context, state, onExpand, onCollapse, onDismiss, onPin }: AdaptiveCardProps) {
-  const [internalState, setInternalState] = useState<CardState>(component.defaultState as CardState);
-  const currentState = state ?? internalState;
-  const isExpanded = currentState === "expanded" || currentState === "docked" || currentState === "fullscreen";
-  const isCollapsed = currentState === "collapsed";
-  const isPreview = currentState === "preview";
-
-  const handleActivate = () => {
-    const next = nextCardState(currentState, "activate", context?.inputModality ?? "pointer");
-    setInternalState(next);
-    onExpand?.(component.id);
-  };
-
-  const handleCollapse = () => {
-    setInternalState("collapsed");
-    onCollapse?.(component.id);
-  };
-
-  const previewContent = component.content.slice(0, 100) + (component.content.length > 100 ? "..." : "");
+/**
+ * One compact card created by the model.
+ *
+ * Collapsed is the resting state: the title and a one-line preview are enough
+ * to scan a list of steps. Hovering or opening one card closes the previous
+ * card, so a guided flow always has a single focus. The panel expands with a
+ * smooth `grid-template-rows` slide (0fr → 1fr) plus an opacity fade, which
+ * makes the hover transition feel fluid instead of popping. `prefers-reduced-motion`
+ * removes both the slide and the fade. The content is rendered by
+ * `InteractiveMarkdown`, which also supplies the safe timer widget.
+ */
+export function AdaptiveCard({
+  card,
+  open,
+  onToggle,
+  onHover,
+  className,
+}: AdaptiveCardProps) {
+  const step = /^step-(\d+)$/.exec(card.id)?.[1];
+  const preview = plainTextFromMarkdown(card.content).slice(0, 120);
+  const panelId = `card-panel-${card.id}`;
 
   return (
     <div
-      data-card-id={component.id}
-      data-state={currentState}
-      className="group/card flex flex-col rounded-2xl border border-line bg-paper shadow-sm transition-all"
-      style={{ minWidth: component.minW, maxWidth: component.maxW ?? undefined, minHeight: component.minH }}
+      data-card-id={card.id}
+      data-state={open ? "expanded" : "collapsed"}
+      onPointerEnter={(event) => {
+        // Hover opens the card only for mouse/pen pointers: on touch a tap
+        // fires a synthetic pointer-enter, which would re-open the card the
+        // same tap's click just closed.
+        if (event.pointerType !== "touch") onHover?.();
+      }}
+      className={cn(
+        "group/card overflow-hidden rounded-2xl border border-line bg-paper/90 shadow-sm backdrop-blur-sm transition-shadow duration-300",
+        open ? "shadow-md" : "shadow-sm",
+        className,
+      )}
     >
-      <div className="flex items-center justify-between gap-2 px-4 py-3">
-        <h3 className="font-mono text-sm font-semibold text-ink truncate">{component.title ?? component.kind}</h3>
-        <div className="flex items-center gap-1">
-          {component.expandable && isCollapsed && (
-            <button
-              type="button"
-              aria-label="Expand"
-              onClick={handleActivate}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  handleActivate();
-                }
-              }}
-              className="rounded-full p-1.5 text-ink-muted hover:bg-line hover:text-ink focus-visible:outline-2 focus-visible:outline-ring"
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        aria-controls={panelId}
+        className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      >
+        {step ? (
+          <span className="grid size-6 shrink-0 place-items-center rounded-full bg-sage-wash font-mono text-[10px] font-semibold text-sage-text">
+            {step}
+          </span>
+        ) : null}
+
+        <span className="min-w-0 flex-1">
+          <span className="block truncate font-mono text-xs font-semibold text-ink">
+            {card.title}
+          </span>
+          {preview ? (
+            // The preview collapses as the panel expands, so the header swaps
+            // the one-line preview for the open panel in one smooth motion.
+            <span
+              className={cn(
+                "grid transition-[grid-template-rows,opacity] duration-300 ease-out motion-reduce:transition-none",
+                open ? "grid-rows-[0fr] opacity-0" : "grid-rows-[1fr] opacity-100",
+              )}
             >
-              <ChevronDown className="size-4" />
-            </button>
+              <span className="min-h-0 overflow-hidden">
+                <span className="mt-0.5 block truncate text-[11px] leading-relaxed text-ink-muted">
+                  {preview}
+                </span>
+              </span>
+            </span>
+          ) : null}
+        </span>
+
+        <ChevronDown
+          aria-hidden="true"
+          className={cn(
+            "size-4 shrink-0 text-ink-muted transition-transform duration-300 ease-out motion-reduce:transition-none",
+            open && "rotate-180",
           )}
-          {isExpanded && component.expandable && (
-            <button type="button" aria-label="Collapse" onClick={handleCollapse} className="rounded-full p-1.5 text-ink-muted hover:bg-line">
-              <ChevronDown className="size-4 rotate-180" />
-            </button>
-          )}
-          {onPin && (
-            <button type="button" aria-label="Pin" onClick={() => onPin(component.id)} className="rounded-full p-1.5 text-ink-muted hover:bg-line">
-              <Pin className="size-4" />
-            </button>
-          )}
-          {onDismiss && (
-            <button type="button" aria-label="Dismiss" onClick={() => onDismiss(component.id)} className="rounded-full p-1.5 text-ink-muted hover:bg-line">
-              <X className="size-4" />
-            </button>
-          )}
+        />
+      </button>
+
+      {/* Always mounted so the open/close transition can animate. `inert` keeps
+          the panel's links and widgets unreachable while it is collapsed. */}
+      <div
+        id={panelId}
+        aria-hidden={!open}
+        inert={!open}
+        className={cn(
+          "grid transition-[grid-template-rows,opacity] duration-300 ease-out motion-reduce:transition-none",
+          open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
+        )}
+      >
+        <div className="min-h-0 overflow-hidden">
+          <div className="max-h-[min(42vh,24rem)] overflow-y-auto border-t border-line px-3 py-3 text-sm leading-relaxed text-ink [scrollbar-gutter:stable]">
+            <InteractiveMarkdown content={card.content} />
+          </div>
         </div>
       </div>
-
-      {isPreview ? (
-        <div className="px-4 pb-3 text-sm text-ink-muted line-clamp-2">{previewContent}</div>
-      ) : isCollapsed ? (
-        <div className="px-4 pb-3 text-xs text-ink-muted truncate">{previewContent}</div>
-      ) : (
-        <div className="px-4 pb-4 text-sm leading-relaxed text-ink whitespace-pre-wrap break-words">{component.content}</div>
-      )}
-
-      {component.toolRefs && component.toolRefs.length > 0 && (
-        <div className="px-4 pb-2 text-[10px] font-mono text-ink-muted/60 truncate">via {component.toolRefs.join(", ")}</div>
-      )}
     </div>
   );
 }

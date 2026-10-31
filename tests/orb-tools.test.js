@@ -26,6 +26,7 @@ describe("parseToolRequests", () => {
         tool: "websearch",
         arguments: { query: "latest bun" },
         transcript: "what is new",
+        evidence: [],
       },
     ]);
   });
@@ -41,11 +42,13 @@ describe("parseToolRequests", () => {
         tool: "websearch",
         arguments: { query: "bun version" },
         transcript: "",
+        evidence: [],
       },
       {
         tool: "get_current_time",
         arguments: { timezone: "Asia/Tokyo" },
         transcript: "",
+        evidence: [],
       },
     ]);
   });
@@ -58,7 +61,7 @@ describe("parseToolRequests", () => {
         { tool: "get_current_time" },
       ]),
     ).toEqual([
-      { tool: "get_current_time", arguments: {}, transcript: "" },
+      { tool: "get_current_time", arguments: {}, transcript: "", evidence: [] },
     ]);
   });
 
@@ -71,6 +74,7 @@ describe("parseToolRequests", () => {
       tool: "websearch",
       arguments: { query: "latest bun" },
       transcript: "",
+      evidence: [],
     });
   });
 
@@ -86,6 +90,7 @@ describe("parseToolRequests", () => {
         tool: "websearch",
         arguments: { query: "latest bun" },
         transcript: "what is new",
+        evidence: [],
       },
     ]);
   });
@@ -97,7 +102,7 @@ describe("parseToolRequests", () => {
         arguments: { timezone: null },
       }),
     ).toEqual([
-      { tool: "get_current_time", arguments: {}, transcript: "" },
+      { tool: "get_current_time", arguments: {}, transcript: "", evidence: [] },
     ]);
   });
 });
@@ -108,7 +113,6 @@ describe("classifyToolOutput", () => {
       classifyToolOutput({
         transcript: "hi",
         speak: "Hi.",
-        conversation: "Hi.",
       }),
     ).toEqual({ kind: "none" });
   });
@@ -149,6 +153,7 @@ describe("classifyToolOutput", () => {
           tool: "webfetch",
           arguments: { url: "https://example.com" },
           transcript: "",
+          evidence: [],
         },
       ]);
       expect(parsed.errors).toHaveLength(2);
@@ -168,7 +173,7 @@ describe("webfetch requests", () => {
         arguments: { url, focus: "install" },
       }),
     ).toEqual([
-      { tool: "webfetch", arguments: { url, focus: "install" }, transcript: "" },
+      { tool: "webfetch", arguments: { url, focus: "install" }, transcript: "", evidence: [] },
     ]);
   });
 
@@ -183,6 +188,7 @@ describe("webfetch requests", () => {
         tool: "webfetch",
         arguments: { url: "https://example.com" },
         transcript: "",
+        evidence: [],
       },
     ]);
   });
@@ -228,6 +234,7 @@ describe("parseNativeToolCalls", () => {
           tool: "get_current_time",
           arguments: { timezone: "Europe/London" },
           transcript: "",
+          evidence: [],
         },
         error: "",
       },
@@ -240,7 +247,7 @@ describe("parseNativeToolCalls", () => {
         id: "call_3",
         request: null,
         error:
-          'Unknown tool "delete_everything" or invalid arguments. Available tools: websearch, webfetch, get_current_time, create.',
+          'Unknown tool "delete_everything" or invalid arguments. Available tools: websearch, webfetch, get_current_time, create, speak.',
       },
     ]);
   });
@@ -324,22 +331,21 @@ describe("runToolWithSources", () => {
 });
 
 describe("renderToolPrompt", () => {
-  test("lists every registered tool and its request shape", () => {
+  test("lists every registered tool and its argument shape", () => {
     const prompt = renderToolPrompt();
 
     for (const tool of ORB_TOOLS) {
       expect(prompt).toContain(tool.function.name);
     }
 
-    expect(prompt).toContain('"tool":"websearch"');
-    expect(prompt).toContain('"tool":"webfetch"');
-    expect(prompt).toContain('"tool":"get_current_time"');
-    expect(prompt).toContain('"arguments":{"query":"..."}');
-    expect(prompt).toContain('"arguments":{"url":"...","focus":"..."}');
-    expect(prompt).toContain("arguments is always an object");
-    expect(prompt).toContain("Return only the tool object");
-    expect(prompt).toContain("latest, current, recent");
-    expect(prompt).toContain("never fetch the same page twice");
+    expect(prompt).toContain("`websearch` — {query}");
+    expect(prompt).toContain("`webfetch` — {url, focus?}");
+    expect(prompt).toContain("`get_current_time` — {timezone?}");
+    expect(prompt).toContain("`create` — {id?, title, content}");
+    expect(prompt).toContain("`speak` — {text, evidence?}");
+    expect(prompt).toContain("Never write a tool call as text");
+    expect(prompt).not.toContain('"tool":"websearch"');
+    expect(prompt).not.toContain("latest, current, recent");
   });
 });
 

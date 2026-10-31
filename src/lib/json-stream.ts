@@ -4,7 +4,7 @@
  * The model streams its JSON object token by token. This scanner surfaces
  * `transcript` as soon as its closing quote arrives and `speak` as a series of
  * deltas, without waiting for the full object. It only reads top-level keys, so
- * a field name inside `conversation` cannot confuse it.
+ * a field name inside another string cannot confuse it.
  */
 
 export type StreamedStringField = {

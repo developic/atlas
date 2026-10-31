@@ -41,6 +41,20 @@ describe("assertFetchableUrl", () => {
     );
   });
 
+  test("accepts a link without a scheme over https", () => {
+    expect(assertFetchableUrl("example.com/docs").href).toBe(
+      "https://example.com/docs",
+    );
+    expect(assertFetchableUrl("example.com/docs?a=b#c").href).toBe(
+      "https://example.com/docs?a=b#c",
+    );
+  });
+
+  test("still rejects garbage without a scheme", () => {
+    expect(() => assertFetchableUrl("just some words")).toThrow("not valid");
+    expect(() => assertFetchableUrl("hello")).toThrow("not valid");
+  });
+
   test("rejects non-web protocols", () => {
     expect(() => assertFetchableUrl("file:///etc/passwd")).toThrow(
       "Only http and https",

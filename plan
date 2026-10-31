@@ -1,0 +1,223 @@
+Atlas agent rewrite — implementation plan
+Scope
+This rewrites the agent stack, not the product:
+- In scope: system prompt, tool contracts/registry, model loop, native tool-calling, final-answer validation, tests, docs.
+- Out of scope: orb visuals, dashboard layout, onboarding, hands scene, Cartesia playback, voice VAD. The NDJSON event contract and UI stay.
+- Preserved: voice-first orb, Baseten transcription + reasoning, Cartesia speech, create as the only screen surface, Markdown cards, <timer> / <next>, stateless server + sessionStorage history, and all four tools (websearch, webfetch, get_current_time, create).
+- No new tools. No Speak tool. No terminal, file editing, Code Mode, permissions, skills, MCP, subagents, or coding-agent features.
+Target architecture
+route
+  └─ runTurn()
+       ├─ build messages: system + history + user audio/transcript
+       ├─ streamModelTurn()  ── native tool_calls + content deltas
+       ├─ tool round?  ── validate → execute → tool messages → loop
+       └─ final answer ── validate {transcript,speak} → cards/sources → events
+The key change: tool use is provider-native and structural, not JSON-in-text.
+- The model emits tool_calls via the OpenAI-compatible API.
+- Tool arguments are JSON Schema–defined and validated before execution.
+- Every tool call gets exactly one role: "tool" result, including invalid or unknown calls.
+- The final answer is a separate JSON object {transcript,speak}, validated once with one repair.
+- The old text protocol ({"tool":"…"}, classifyToolOutput, parseNativeToolCalls, BASETEN_NATIVE_TOOLS) is deleted. One protocol, no dual path.
+The model loop
+This is the part you asked about. The loop is intentionally small and has one job: run tool rounds until the model answers, then validate the answer.
+async function runTurn(input) {
+  const state = createTurnState(input);
+
+  for (;;) {
+    if (state.signal.aborted) throw new OrbError("timeout", …);
+
+    if (state.rounds >= MAX_TOOL_ROUNDS) {
+      return forceAnswer(state);
+    }
+
+    const response = await streamModelTurn(state, {
+      mode: "tools",
+      toolChoice: "auto",
+    });
+
+    if (response.toolCalls.length > 0) {
+      await runToolRound(state, response);
+      state.rounds += 1;
+      continue;
+    }
+
+    return finalizeAnswer(state, response);
+  }
+}
+1. One streaming model call
+streamModelTurn always streams:
+- delta.content → accumulated for the final answer; speak deltas are extracted with the existing json-stream.
+- delta.tool_calls[] → accumulated by index:
+- id
+- function.name
+- function.arguments (concatenated string)
+- finish_reason, usage, and model are captured.
+- stream_options: { include_usage: true } stays.
+When the stream ends, each tool call is finalized:
+- Valid JSON → typed ToolCall.
+- Invalid JSON → a ToolCall carrying parseError, not a crash.
+- Empty arguments → {}.
+2. One tool round
+async function runToolRound(state, response) {
+  const calls = response.toolCalls;
+
+  // Echo exactly what the model sent. Every call must be answered.
+  state.messages.push({
+    role: "assistant",
+    content: response.content || null,
+    tool_calls: calls.map(echoCall),
+  });
+
+  const results = await Promise.all(
+    calls.map((call) => executeToolCall(state, call)),
+  );
+
+  for (const [index, call] of calls.entries()) {
+    state.messages.push({
+      role: "tool",
+      tool_call_id: call.id,
+      content: results[index].message,
+    });
+  }
+
+  collectCards(state, results);
+  collectSources(state, results);
+}
+executeToolCall handles every failure as a model-readable result:
+- Unknown tool → "Unknown tool … Available tools: …"
+- Invalid arguments → "Invalid arguments for …: … Update the arguments and call the tool again."
+- Malformed JSON → "Arguments were not valid JSON: …"
+- Tool failure → "Failed: …"
+- Success → the tool's text result (capped at 4,000 chars)
+No tool failure throws. The model sees the result and can retry on the next round.
+Independent calls run together with Promise.all. The existing per-turn cache prevents an identical search/fetch from running twice.
+3. Forced answer
+At the round cap:
+{
+  ...request,
+  tools,                    // keep definitions for the cache prefix
+  tool_choice: "none",      // structurally forbid calls
+  messages: [
+    ...messages,
+    { role: "user", content: MAX_STEPS_MESSAGE },
+  ],
+}
+The MAX_STEPS_MESSAGE says: “No more tool calls. Answer with {transcript,speak} using the information you already have.” If the model still returns tool_calls, the turn fails with no_reply. This mirrors OpenCode’s final-step behaviour without adding an agent mode.
+4. Final answer
+finalizeAnswer:
+1. Parse {transcript,speak}.
+2. Validate lengths and normalize speech.
+3. If invalid, one repair call with:
+- the same messages,
+- tool_choice: "none",
+- the malformed reply and a correction message,
+- the final-answer schema if supported.
+4. If the repair still fails, throw invalid_json.
+5. Attach cards and sources collected during tool rounds.
+6. Return OmniTurn with meta.
+The cards are collected from tool results; the final answer never invents them.
+5. Request shapes
+Mode	tools	tool_choice	response_format
+Tool round	all four	"auto"	probe-decided
+Forced answer	all four	"none"	schema if supported
+Repair	all four	"none"	schema if supported
+response_format is decided by a Phase 0 probe:
+1. json_schema with {transcript,speak} (preferred).
+2. json_object (fallback).
+3. No response_format, validate in code (last resort).
+The schema carries field descriptions, so the prompt no longer explains transcript/speak.
+6. Streaming and events
+- speak-delta still streams from content as the model writes.
+- searching / tool events fire when a tool call is finalized.
+- speaking fires once with the final text, cards, and sources.
+- Audio/TTS flow is unchanged.
+- Early transcript: tool rounds no longer carry a transcript field. The final answer supplies it. If early transcript matters, the model may put {"transcript":"…"} in tool-round content as a best-effort; the server emits it if present. This is optional, not part of the protocol.
+Module plan
+File	Change
+src/lib/tools/types.ts	New provider-agnostic OrbTool (name, description, parameters, execute), ToolCall, ToolResult with error?. Remove ToolRequest, ToolParse, NativeCall.
+src/lib/tools/registry.ts	ORB_TOOLS, toOpenAITool(), validateToolArguments(), executeToolCall(), renderToolPolicy(), toolDetail(). Delete text-protocol parsers.
+src/lib/tools/create.ts	Adapt to the new OrbTool shape; keep card validation and widget parsing.
+src/lib/tools/websearch.ts, webfetch.ts, current-time.ts	Adapt shape only; behavior unchanged.
+src/lib/widgets.ts	New contract exporting timer/next limits and syntax; imported by the parser and prompt.
+src/lib/prompt/	New modules: index.ts, identity.ts, tools.ts, cards.ts, conversation.ts, examples.ts, date.ts.
+src/lib/model/	Split into index.ts, client.ts, stream.ts, turn.ts, finalize.ts, types.ts. Keep respondToAudio, respondToText, TurnMeta, TURN_BUDGET_MS, composeTurnSignal, normalizeSession as the public API.
+src/lib/model/stream.ts	New native SSE parser and tool_calls accumulator.
+src/lib/model/turn.ts	The loop above.
+src/lib/model/finalize.ts	Final JSON parse, one repair, cards/sources.
+src/lib/orb-turn.ts	Remove legacy conversation handling; keep {transcript,speak} normalization.
+src/app/api/orb/respond/route.ts	Remove the native flag; keep the NDJSON event contract.
+src/components/dashboard/use-orb-turn.ts	Only if tool detail types change; event handling stays.
+scripts/omni-probe.mjs	Probe native tools, streaming tool calls, and json_schema as the new baseline.
+Prompt plan
+The prompt becomes smaller and more modular. It teaches judgment, not syntax.
+Section	Contents
+date.ts	Day-granular date header (cache-stable within a day).
+identity.ts	Atlas persona, job, priority, “spoken + shown” contract.
+tools.ts	Generated from ORB_TOOLS: when to search, fetch, use current time, create. No argument shapes; schemas own those.
+cards.ts	Card path vs speech path, one home per rule, limits imported from cards.ts, widget syntax imported from widgets.ts.
+conversation.ts	History references, transcription errors, uncertainty, clarification.
+examples.ts	4–6 compact examples, each labeled “Step 1: tool” and “Step 2: answer”.
+index.ts	Composes the sections and the final check.
+What is removed:
+- All {"tool":…} syntax and tool-request JSON examples.
+- Duplicated card-trigger lists (currently repeated in three places).
+- The “After the create results” blocks that the model can copy as a direct answer.
+- Word/sentence targets and all-caps emphasis.
+- Tool argument documentation (moved to schemas).
+The final answer schema, not the prompt, describes transcript and speak. The tool schemas, not the prompt, describe arguments.
+TODO list
+Phase 0 — Protocol gate (no production code)
+- 0.1 Extend scripts/omni-probe.mjs to test: native tools, streaming tool_calls, native tools + json_object, native tools + json_schema.
+- 0.2 Run the probe and record: tool-call round, parallel calls, final JSON, cached tokens.
+- 0.3 Confirm the final request shape. If native tools fail, stop and report; do not keep a dual protocol.
+Verify: probe output shows a tool call, a tool result, and a valid final answer.
+Phase 1 — Contracts and registry
+- 1.1 New OrbTool, ToolCall, ToolResult types.
+- 1.2 toOpenAITool() and schema-driven validateToolArguments().
+- 1.3 executeToolCall() with unknown tool / invalid args / malformed JSON / execution failure handling.
+- 1.4 Adapt the four existing tools; no behavior changes.
+- 1.5 Move widget limits into src/lib/widgets.ts; import them in interactive-markdown.ts and the prompt.
+- 1.6 Delete classifyToolOutput, parseToolRequests, parseNativeToolCalls, ToolRequest, ToolParse, NativeCall.
+Verify: bun test tests/orb-tools.test.js tests/create.test.js; bun run typecheck.
+Phase 2 — Prompt rewrite
+- 2.1 Create src/lib/prompt/ modules.
+- 2.2 Generate tool policy from ORB_TOOLS.
+- 2.3 Import card and widget limits; remove hardcoded numbers.
+- 2.4 Rewrite examples with explicit Step 1 / Step 2 labels.
+- 2.5 Remove all text tool-protocol syntax and duplicated rules.
+- 2.6 Keep the final answer shape and final check.
+Verify: bun test tests/atlas-prompt.test.js; prompt has no {"tool":; generated tool names match the registry; token count recorded.
+Phase 3 — Model loop
+- 3.1 Create src/lib/model/ modules and move the public API.
+- 3.2 Implement streaming SSE + tool_calls accumulation.
+- 3.3 Implement the loop, tool rounds, and every-call-answered invariant.
+- 3.4 Implement the forced answer with tool_choice: "none" and tools retained.
+- 3.5 Implement final JSON validation + one repair.
+- 3.6 Keep cards/sources collection, per-turn tool cache, abort/timeout, busy retry, usage meta.
+- 3.7 Remove BASETEN_NATIVE_TOOLS and the old text path.
+Verify: new offline loop tests (§ below); bun run typecheck.
+Phase 4 — Route integration
+- 4.1 Update route imports; remove the flag.
+- 4.2 Keep the NDJSON event names and payloads unchanged.
+- 4.3 Confirm tool traces, cards, sources, transcript, and audio events still flow.
+Verify: dev server turn with text input; dashboard shows cards, timer, next, search, fetch.
+Phase 5 — Tests
+- 5.1 Rewrite tests/omni-stream.test.js for native tool calls.
+- 5.2 Add tests/native-stream.test.js: fragmented arguments, parallel calls, empty args, invalid JSON.
+- 5.3 Add tests/model-loop.test.js: create → result → answer; every call answered; round cap; forced answer; repair.
+- 5.4 Update tests/atlas-prompt.test.js, tests/create.test.js, tests/orb-tools.test.js, tests/README.md.
+- 5.5 Remove tests for the deleted text protocol.
+Verify: bun test tests/, bun run typecheck, bun run lint, bun run build.
+Phase 6 — Live eval and docs
+- 6.1 Live 6-run probes: coffee, ten-step, timer, next, search, fetch. Record card rate, false claims, latency.
+- 6.2 Playwright check: cards, timer, next, audio, tool trace.
+- 6.3 Update AGENTS.md and add a context.md entry.
+- 6.4 Final diff review; remove dead code.
+Verify: results table in the final report; no false claims in the sampled runs.
+Decisions I need from you
+1. Native-only protocol. Delete the text tool path and the BASETEN_NATIVE_TOOLS flag entirely. This follows “no backward compatibility.” Confirm.
+ans: yes do it
+2. Structural card-claim guard. Native tools alone do not force create; my probe showed 4/6 on the ten-step request. The only deterministic fix is a server check: if speak claims cards and cards.length === 0, make one repair round (“call create or remove the claim”). You previously said no server-side fix. I recommend it now, but I will omit it if you want prompt-only.
+ans:ok
+3. Final-answer schema. Use json_schema if Phase 0 passes; otherwise json_object + validation. Confirm that preference
+ans: Use JSON Schema

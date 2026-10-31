@@ -47,13 +47,14 @@ describe("parseToolRequest", () => {
       tool: "websearch",
       arguments: { query: "latest bun" },
       transcript: "hi",
+      evidence: [],
     });
   });
 
   test("ignores a normal final turn", () => {
     expect(
       parseToolRequest(
-        '{"transcript":"hi","speak":"hello","conversation":"hello"}',
+        '{"transcript":"hi","speak":"hello"}',
       ),
     ).toBeNull();
   });

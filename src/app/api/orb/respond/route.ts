@@ -32,6 +32,8 @@ type TurnInput = {
   pace?: CartesiaPace;
   /** Stable per-conversation id; routes turns to one replica for prompt caching. */
   session?: string;
+  /** Ask the server to attach raw provider payloads (development only). */
+  debug: boolean;
 };
 
 /**
@@ -41,9 +43,9 @@ type TurnInput = {
  * finishes:
  *   {"status":"transcript","transcript":"…"}
  *   {"status":"searching","query":"…"}      // or {"status":"tool","tool":"…","detail":"…"}
- *   {"status":"speak-delta","text":"…"}
+ *   {"status":"speak-delta","text":"…"}    // only after the turn passed integrity validation
  *   {"status":"audio","pcm":"…","sampleRate":24000,"seq":0}
- *   {"status":"speaking","transcript":"…","speak":"…","conversation":"…","sources":[…]}
+ *   {"status":"speaking","transcript":"…","speak":"…","cards":[…],"sources":[…]}
  *   {"status":"audio-done"}                 // PCM path
  *   {"status":"audio-mp3","audio":"data:…"}  // MP3 fallback
  *   {"status":"error","code":"…","message":"…"} on failure
@@ -124,7 +126,17 @@ export async function POST(request: Request) {
               }
             } catch (error) {
               // Try the whole-reply MP3 fallback at the end if nothing played.
+              // Logged here because the fallback hides the cause: without
+              // this the wire shows only a slow audio-mp3 with no reason.
               ttsFailure = error;
+              console.error(
+                JSON.stringify({
+                  event: "orb-turn-tts",
+                  turnId,
+                  stage: "pcm-stream",
+                  message: error instanceof Error ? error.message : String(error),
+                }),
+              );
             }
           });
         };
@@ -148,6 +160,9 @@ export async function POST(request: Request) {
             send({ status: "transcript", transcript: text });
           },
           onSpeakDelta: (delta: string) => {
+            // Fires only at finalization: the model loop emits deltas after
+            // every segment passed the integrity gate, so TTS receives
+            // exactly the approved speech.
             send({ status: "speak-delta", text: delta });
 
             for (const sentence of chunker.push(delta)) {
@@ -157,19 +172,20 @@ export async function POST(request: Request) {
         };
 
         stage = "omni";
+        const debug = input.debug && turnDebugEnabled();
         turn = input.audio
           ? await respondToAudio(
               input.audio,
               input.mimeType,
               input.history,
               callbacks,
-              { signal: clientSignal, session: input.session },
+              { signal: clientSignal, session: input.session, debug },
             )
           : await respondToText(
               input.transcript,
               input.history,
               callbacks,
-              { signal: clientSignal, session: input.session },
+              { signal: clientSignal, session: input.session, debug },
             );
 
         if (!turn.speak) {
@@ -183,8 +199,9 @@ export async function POST(request: Request) {
           status: "speaking",
           transcript: turn.transcript || input.transcript,
           speak: turn.speak,
-          conversation: turn.conversation,
+          ...(turn.cards.length > 0 ? { cards: turn.cards } : {}),
           ...(turn.sources.length > 0 ? { sources: turn.sources } : {}),
+          ...(turn.debug ? { debug: turn.debug } : {}),
         };
 
         // Send the full text before TTS finishes. The client holds the first
@@ -296,6 +313,7 @@ async function readRequest(request: Request): Promise<TurnInput> {
       voice?: unknown;
       pace?: unknown;
       session?: unknown;
+      debug?: unknown;
     };
 
     return {
@@ -309,6 +327,7 @@ async function readRequest(request: Request): Promise<TurnInput> {
       voice: isCartesiaVoiceId(body.voice) ? body.voice : undefined,
       pace: isCartesiaPace(body.pace) ? body.pace : undefined,
       session: readSession(body.session),
+      debug: body.debug === true,
     };
   }
 
@@ -319,6 +338,7 @@ async function readRequest(request: Request): Promise<TurnInput> {
   const pace = form.get("pace");
   const transcript = form.get("transcript");
   const session = readSession(form.get("session"));
+  const debug = form.get("debug") === "1";
   const preferences = {
     voice: isCartesiaVoiceId(voice) ? voice : undefined,
     pace: isCartesiaPace(pace) ? pace : undefined,
@@ -334,6 +354,7 @@ async function readRequest(request: Request): Promise<TurnInput> {
           : "",
       history,
       session,
+      debug,
       ...preferences,
     };
   }
@@ -348,6 +369,7 @@ async function readRequest(request: Request): Promise<TurnInput> {
     transcript: "",
     history,
     session,
+    debug,
     ...preferences,
   };
 }
@@ -359,4 +381,16 @@ async function readRequest(request: Request): Promise<TurnInput> {
  */
 function readSession(value: unknown): string | undefined {
   return normalizeSession(typeof value === "string" ? value : undefined);
+}
+
+/**
+ * Raw provider payloads contain reasoning and tool arguments, so they stay off
+ * by default in production. `ATLAS_DEBUG_TURNS=1` opts a production deployment
+ * into the same panel for on-call debugging.
+ */
+function turnDebugEnabled(): boolean {
+  return (
+    process.env.NODE_ENV !== "production" ||
+    process.env.ATLAS_DEBUG_TURNS === "1"
+  );
 }

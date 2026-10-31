@@ -55,7 +55,7 @@ export function computeAvailableSpace(
   orbBounds: { width: number; height: number; top: number; left: number; right: number; bottom: number; x: number; y: number } | DOMRect | null,
 ): { w: number; h: number } {
   const gutterTotal = chrome.gutter * 2;
-  let w = Math.max(0, viewport.w - gutterTotal);
+  const w = Math.max(0, viewport.w - gutterTotal);
   let h = Math.max(0, viewport.h - chrome.headerH - chrome.dockH);
 
   if (orbBounds) {

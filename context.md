@@ -1,5 +1,132 @@
 # Project Context
 
+## 2026-10-31 08:31 IST (03:01 UTC) — Fix `no_reply` after action rounds: forced answers keep the speak tool
+
+- Root cause: after a turn created a card or ran another action, `forceAnswer` requested the final answer with tools disabled but still validated it through `validateSpeechClaim`. Rule B requires every utterance after an action to cite an execution, and only a native tool call has an `evidence` slot. A tools-free plain answer could therefore never pass, so any action turn that reached the round cap was guaranteed to fail with `no_reply`. The forced prompt also told the model to use the speak tool while suppressing it.
+- `model.ts` now sends only the `speak` tool with `tool_choice: { type: "function", function: { name: "speak" } }` for the final answer; `runModelTurn` accepts `forceSpeak` and `callModel` applies the restricted toolset. The length-truncation retry uses the same forced-speak request instead of a tools-free plain-text retry, so a cut-off turn can still produce a validated utterance with evidence.
+- Reworded both prompts: the forced round blocks search/fetch/create/time calls and requires speak, while the length retry asks for a focused plain-text speak answer. Plain-content fallbacks still pass through the same integrity gate and still fail closed.
+- Tests: `omni-stream.test.js` adds a regression where create succeeds, two plain replies are withheld, and the forced request must carry only `speak` plus the forced `tool_choice`; the forced answer then succeeds by citing `exec_1`. The existing forced-answer and length-retry tests now assert the speak-only shape and the updated prompt. A live Baseten check returned a forced speak call with `evidence:["exec_1"]` after a mocked create plus two repairs, and the turn completed with one card.
+- Verified: `bun test tests/` 325 pass / 0 fail, `bun run typecheck` clean, `bun run lint` exits 0 with the same 31 pre-existing warnings.
+
+## 2026-10-31 08:22 IST (02:52 UTC) — Floating AI wire panel for turn debugging
+
+- New `src/components/dashboard/turn-debug-panel.tsx`: a non-modal, fixed top-right panel on `/dashboard` with `Events`, `Model`, and `Turn` tabs. The bug-icon launcher opens it; `Ctrl/Cmd+Shift+D` and the Ctrl+K command entry `AI wire (JSON)` toggle it, and Escape closes it. It shows the last turn only, copies the active tab as JSON, clears the capture, and has a one-line test prompt that sends through the normal `sendText` path. PCM frames are aggregated by count, approximate decoded bytes, and sample rate so base64 never floods the DOM; the header shows status, elapsed time, and event count.
+- New `src/lib/turn-debug.ts`: `TurnDebug`/`TurnDebugRound`/`TurnWire` contracts, `isTurnDebug`, `eventSummary`, `displayTurnEvent`, `withoutTurnDebug`, `wireJson`, `formatWireBytes`, and `MAX_WIRE_FRAMES` (240). The Events tab labels every frame; the Model tab renders content, collapsible reasoning, tool calls with parsed arguments, usage counters (prompt/cached/completion/reasoning/audio), and the untouched `raw response JSON`.
+- Server capture is opt-in and gated: the client sends `debug` only when `NODE_ENV !== "production"`; `api/orb/respond` attaches raw payloads only when the request asks and `NODE_ENV !== "production"` or `ATLAS_DEBUG_TURNS=1`. `model.ts` keeps the exact parsed Baseten payload per model call (including length retries and the forced-answer round) with the round index, turn-relative `atMs`, duration, and whether tools were enabled; `finalize` attaches the rounds to `OmniTurn.debug`, and the route adds them to the final `speaking` frame. No API key or request headers are copied.
+- `turn-stream.ts` accepts an optional `debug` on `SpeakingEvent`, strips malformed debug data without discarding the reply, and adds an `onEvent` debug tap that fires for every valid frame before dispatch — including an `error` frame before it throws. `use-orb-turn.ts` records the wire from that tap, aggregates PCM, marks the turn `running | done | error | stopped`, and exposes `wire`/`clearWire`; history and `sessionStorage` are unchanged.
+- Tests: new `tests/turn-debug.test.js` covers the guard, display, summary, and copy helpers; `turn-stream.test.js` covers debug passthrough/sanitization and the error-frame tap; `omni-stream.test.js` covers per-round capture, the length retry, and the no-secret assertion. Verified `bun test tests/` 324 pass / 0 fail across 26 files, `bun run typecheck` clean, and `bun run lint` exits 0 with the same pre-existing warnings. Mocked and real Playwright runs on `/dashboard` confirmed the Events and Model tabs and the raw provider payload with no console errors.
+
+## 2026-10-30 23:58 IST (18:28 UTC) — Execution-integrity architecture: ledger, speech isolation, and the final-response gate
+
+- New `src/lib/execution-ledger.ts`: one ledger per turn gives every tool call an `exec_N` record (`running → succeeded | failed`), dedupes identical calls (tool + arguments + evidence) by reusing the stored record — a repeated identical call is stamped "was not re-run" and can never overwrite the stored outcome (first completion wins). `markDelivered` tracks which results the model actually saw; `hasActionAttempts()` excludes speak records; `executionStamp()` prefixes every tool message with `[execution exec_N succeeded|failed]`.
+- New `src/lib/speech-integrity.ts` (`validateSpeechClaim`): the final-response gate. Citations must be real, delivered, settled, non-speak executions (rule A); once actions ran, every utterance must cite at least one execution (rule B); success-claim phrasing pinned only to failed executions is rejected (rule C); in a turn with no actions, action-claim phrasing alone is rejected (rule D); tool-call JSON arriving as text is structurally rejected, never executed; and Markdown/code formatting in speech is withheld because TTS reads it literally — formatted content goes to `create` and speak stays plain text. `ACTION_CLAIM_PATTERNS` is a tightly scoped backstop only, not the primary mechanism.
+- `src/lib/tools/types.ts`: requests carry protocol-level `evidence` (nullable `["array","null"]` speak slot, max 8, collected by `collectEvidence`, never inside the argument caps or argument limits); new `ToolRunContext` threads `{ledger, record, evidence}` into execution.
+- `src/lib/tools/registry.ts`: `executeTool(name, args, signal?, context?)` returns the raw `ToolOutcome` and completes the ledger record with the real result (`runToolWithSources` stays as the historical `ToolResult` wrapper); request parsing extracts `evidence` from beside `tool` or inside `arguments`; `renderToolPrompt()` now stamps and documents the evidence contract; speak's `text` cap set to 4 000 (was silently the 400 default).
+- `src/lib/tools/speak.ts`: evidence schema + gate validation in `runSpeak` (no ledger → legacy receipt); withheld utterances return model-readable failure text. websearch/webfetch runtime failures now return `ok:false` (instead of ok:true with instructive text) so the ledger records them as failed and they can never back a success claim; empty search results stay citable.
+- `src/lib/model.ts` rewritten: `interceptJsonToolCalls` removed (plain-text JSON is never replayed as tool calls — Exa cannot be triggered by text); speech isolation — segments are buffered during rounds and `onSpeakDelta` fires only in `finalize`, after validation, so TTS receives exactly the approved speech; execution begins synchronously in call order before promises run, so a same-round speak sees its sibling attempts; terminal rounds require all calls succeeded AND all create/speak AND an approved segment; non-terminal rounds push stamped tool messages and mark delivery; plain content is committed with empty evidence and, when rejected, pushes a corrective message and loops within the round cap; `forceAnswer` validates leftover speak/plain and throws `no_reply` on unsupported claims; `finalize` throws `no_reply` before emitting when nothing speakable survived.
+- New tests: `tests/execution-ledger.test.js` (25 checks: ledger semantics + gate rules A–D + plain-text rule + pattern scope) and `tests/execution-integrity.test.js` (17 end-to-end mocks of the eight traced vulnerabilities: failed create + success claim, failed search + fabrication, plain-text claim, length-retry claim, forced answers supported/unsupported, JSON-as-text never executed, deduped failed search, TTS deltas only at finalization; plus markdown→create repair, stamps reaching the model, empty-citable searches, ordinary conversation, distinct repeated actions). omni-stream fixtures updated: `finalTurn` accepts `evidence`, the speak+create mixed round now repairs on the next round citing `exec_1`.
+- Verified: `bunx tsc --noEmit` clean; `bun run lint` 31 warnings (below the 33 baseline; the former rules-of-hooks errors from `useTranscript` are gone — renamed `applyTranscript`); `bun test tests/` 303 pass / 0 fail across 25 files.
+
+## 2026-10-30 22:32 IST (22:32 UTC) — Prompt updated to describe the next button as a pressed action button
+
+- `instructions/rules.ts` Next-buttons section now matches the widget the user actually sees: the tag renders as "a real action button the user presses"; `label` is told to be an action ("Start step 2" beats "Next"); `send` is phrased so the first press is the whole request; `show` opens in the same click as the send; and the press-once model is stated ("presses once per turn… after the reply it is marked sent"), so the model does not write prompts expecting repeated presses.
+- `tools/create.ts` tool description now says the next widget renders as an action button pressed once to continue, so the generated tool prompt stays in sync with the system prompt.
+- All pinned strings from the next-button prompt tests survive; verified `bunx tsc --noEmit` clean, lint unchanged at 33 warnings, `bun test tests/` 263 pass / 0 fail.
+
+## 2026-10-30 22:30 IST (22:30 UTC) — NextCard renders through the shared Base UI Button
+
+- `NextCard` now renders through `@/components/ui/button` (`ButtonPrimitive` + `cva` variants) with `variant="outline"` instead of a hand-rolled `<button>`; hover/focus/disabled states come from the shared variants, with `hover:border-sage/40 hover:bg-sage-wash` and a full-width `rounded-xl` mono label kept as `className` to match the card look. The one-press contract is unchanged: press opens the `show` card and/or sends the fixed `send` prompt once, busy turns become a Continue press, a failed/stopped turn re-enables the button, and the `Sent` state disables with a check icon and "Sent to Atlas" status. An `aria-label` now names the button (label plus "(sent)").
+- `TimerCard`'s Start/Pause/Reset/Continue controls still use their own small circular styles; converting them was out of scope for this change.
+- Verified: `bunx tsc --noEmit` clean, lint still at the 33 pre-existing warnings (warning count unchanged, none new for `next-card`), `bun test tests/` 263 pass / 0 fail.
+
+## 2026-10-30 22:26 IST (22:26 UTC) — Markdown stack refined: dead code killed, parser deduped, GFM tables styled
+
+Code review scored the three markdown files (parser 9/7, renderer 7/6, glue 9/8 out of 10 for function/writing) and the agreed refinements:
+
+- `lib/interactive-markdown.ts`:
+  - Deleted the six alias constants (`TIMER_*_MAX`/`NEXT_*_MAX` — byte-identical aliases of `WIDGET_*`, imported nowhere).
+  - Removed the production-dead `pending` flag from `ParsedInteractiveMarkdown` (only two test assertions read it; `create.ts`, the renderer, and `plainTextFromMarkdown` use `blocks` only). Unterminated-tag detection is unchanged — still an `invalid` block carrying `/>` in the reason.
+  - New exported `parseWidget(tag, body)` with overload signatures that keep `name` and `attrs` correlated is now the single validation path for both tags (shared allowlist, bounds, label/send/show checks); `parseTimerAttributes`/`parseNextAttributes` are 3-line wrappers that keep their `{ok, attrs}` test shapes. The loop's copy-pasted next/timer branches are gone (tag dispatch via ternary so the overload stays correlated).
+  - Module-level `TIMER_BOUNDS_FAIL` string replaces the duplicated bounds sentence.
+- `components/ui/markdown.tsx`: GFM tables are now styled (scrolling wrapper with rounded border, hairline `border-line` rows, mono header row) instead of falling back to raw browser tables in a ~320 px card column; the prompt actively pushes tables, so this closes a real gap. Added `h4`/`h5`/`h6` heading styles that previously fell back to browser defaults, and a subtitle-styled `del` for GFM strikethrough.
+- `components/dashboard/interactive-markdown.tsx`: the malformed-widget error paragraph is extracted into a named `WidgetError` component; render logic unchanged.
+- `tests/interactive-markdown.test.js`: the two `pending` assertions were replaced by behavior-level ones (block count 4; the unterminated-tag test keeps its type sequence and `/>` reason assertions).
+- Verified: `bunx tsc --noEmit` clean, no lint warnings for the touched files, `bun test tests/` 263 pass / 0 fail.
+
+## 2026-10-30 22:12 IST (22:12 UTC) — AdaptiveCard: animated open/close panel
+
+- The card panel no longer mounts/unmounts on `open`; it is always mounted and animates with a `grid-template-rows` 0fr → 1fr slide plus an opacity fade (300 ms ease-out, `transition-[grid-template-rows,opacity]`). The one-line collapsed preview animates the opposite way (1fr → 0fr + fade) so the header swaps preview for panel in one motion; the chevron rotation and shadow also ease at the same duration. `prefers-reduced-motion` gets `transition-none` everywhere (instant open/close).
+- Because the panel is always in the DOM, the collapsed one gets `aria-hidden={!open}` and `inert={!open}`, so links/timer/next widgets inside a collapsed card are not focusable, clickable, or screen-reader reachable — matching the old unmounted behavior. Unstarted timers in hidden cards stay idle (timers are explicitly started), so no auto-send can fire from a card the user never opened.
+- Verified: `bunx tsc --noEmit` clean, lint at the same 33 pre-existing warnings (none for `adaptive-card`), `bun test tests/` 263 pass / 0 fail.
+
+## 2026-10-30 21:58 IST (21:58 UTC) — Prompt rewrite: card path is a hard gate, no JSON envelope for create/speak, false-claim fix
+
+Fixed the screenshot failure where Atlas said "I've put the full guide on cards" with no cards on screen: the model could promise cards in `speak` without ever calling `create`, because parts of the prompt still taught the removed `{"transcript","speak"}` JSON envelope and a JSON request object for every tool. Completed the in-tree rewrite the tests already pinned:
+
+- `tools/registry.ts` `renderToolPrompt()`: `websearch`/`webfetch`/`get_current_time` keep their `Request:` JSON shapes (the server still accepts both shapes for the info tools); `create` and `speak` now render an `"Arguments:"` shape with **no** `{"tool":"create"}` envelope, so the model is never taught to write a card as text JSON. The "Running a tool" line that said "answer with the normal {"transcript","speak"} object" is replaced with "call the next tool, or call `speak` with your answer".
+- `instructions/identity.ts`: speak/create bullets describe parameters in prose instead of JSON braces; card path is now a hard gate — "your reply this round is only the create tool requests. No speak, no summary, and no plan text. A promise is not a card. A missing card is a broken answer."
+- `instructions/rules.ts`: the same hard-gate copy in the duplicated path decision; "A numbered plan is still the card path when it has more steps than the six-card limit: group related steps into at most six cards"; the claim rule is now "Never claim that steps, details, or a card are on screen unless you called create this round. A promise is not a card…" (no backticks, so it survives as a checked phrase); Conversation gains "Length: let the answer be as long as the request needs".
+- `instructions/examples.ts`: examples reworded to "Bun vs Node.js for a small API. Use a table." and "How TCP handles packet loss. Explain it in about four paragraphs."
+- `lib/model.ts`: `interceptJsonToolCalls` no longer imports `json-extract`/`extractJsonValue` — it `JSON.parse`s bare JSON content and classifies through `classifyToolOutput`, keeping the replay safety net for JSON-in-content (fenced/prose JSON now falls through to the plain-content path). This is the last `json-extract` consumer outside the registry's text parser, so `json-extract` is now registry-only.
+- Verified: `bun test tests/` 263 pass / 0 fail (all 7 previously failing prompt/model tests now pass), `bunx tsc --noEmit` clean, lint at the same 33 pre-existing warnings with none new.
+
+## 2026-10-30 21:49 IST (21:49 UTC) — Dashboard cards: auto-open first card, open on hover
+
+- `AdaptiveCard` gained an optional `onHover` prop fired on `pointerenter` at the card root. The handler is skipped for `pointerType === "touch"`, because a touch tap fires a synthetic pointer-enter that would immediately re-open the card the same tap's click just collapsed. Hover follows the existing one-open-card model: hovering a card opens it and closes the previous one, and the card stays open after the pointer leaves. Clicking the header still toggles (open/close) as before.
+- `DashboardFlow` now auto-opens the first card of a new turn: the effect keyed on `lastAssistantId` that used to reset `openCardId` to `null` instead sets `openCardId` to `cards[0]?.id ?? null`, so a fresh reply's first card is readable without a click (also covers a session restored from `sessionStorage`, where the hydrate changes `lastAssistantId`). The existing `cards`/`openCardId` guard effect is unchanged and still closes a stale id.
+- Verified: `bun run lint` (no new rule categories — the auto-open effect reuses the file's existing `set-state-in-effect` pattern) and `bun test tests/` (256 pass, 7 pre-existing failures in `atlas-prompt`/`omni-stream` confirmed present with this change reverted, from the earlier prompt-rewrite work in the tree).
+
+## 2026-10-31 IST — OpenCode-inspired rewrite (native tools, speak-in-loop, layered prompt, typed errors, Result, retry, validation)
+
+- Migrated the orb to **native-only tool calling**: every model action is a native `tool_calls` entry; `speak` is now the fifth tool (`tools/speak.ts`) whose segments concatenate into `OmniTurn.speak`. The JSON `{"transcript","speak"}` envelope and `parseTurn`/`normalizeTurn` path in `orb-turn.ts` were removed; `orb-turn.ts` now exports only `normalizeSpeech` + `MAX_TRANSCRIPT_CHARS`. The forced-answer round asks for a `speak` tool call. `speak` can be called multiple times per turn and `onSpeakDelta` fires per segment for interleaved TTS (Task 4 wiring done in Task 3; `route.ts` already supports multiple `speak-delta` frames via the sentence chunker).
+- Decomposed the monolithic prompt into **layered instruction modules**: `instructions/identity.ts` (persona + Today block + `formatCurrentDate`), `instructions/rules.ts` (priority, cards, timers/next, conversation, uncertainty, final check), `instructions/examples.ts` (few-shot pairs), `instructions/index.ts` (composes `renderToolPrompt()` + layers). `atlas-prompt.ts` is now a thin re-export. Net new behavior: none — byte-identical prompt output, verified by 18 existing prompt tests plus 3 new layer tests.
+- Good-code hardening: **6A** `orb-errors.ts` now has 9 codes (`fetch_failed`, `search_failed` added) and `webfetch.ts`/`websearch.ts` throw `OrbError` instead of bare `Error` (typed errors); **6B** `tools/types.ts` adds `ToolOutcome` (`{ok:true;result}|{ok:false;error}`) and every `runXxx` returns it — `runToolWithSources` unwraps at one boundary; **6C** new `src/lib/retry.ts` (`withRetry` + `retryAfterMs`) with jitter + `Retry-After` header, wired into busy retries in `model.ts`/`route.ts`; **6D** `registry.ts` now has a `validateToolArgs` helper centralising `isNullable` + caps + `required` checks.
+- `json-stream.ts` is now dead code (no `src/` importer) — kept because `tests/sse.test.js` still covers it; `json-extract.ts` stays because `registry.ts:parseToolRequest` still uses it. Cleanup deferred per plan 6F.
+- `AGENTS.md` updated: `src/lib/instructions/` tree, `tools/speak.ts`, native-only `model.ts` note, minimal `orb-turn.ts` note.
+
+## 2026-10-30 13:08 IST (07:38 UTC) — Teaching requests take the card path, prompt caps removed
+
+- `atlas-prompt.ts` now names teach, show-how, walk-through, and guide requests as explicit card-path triggers. "teach me", "show me how", "walk me through", "how do I make…", and "give me a guide" are treated as procedure requests even when they sound conversational, and a matching "Can you teach me how to make coffee?" example creates two step cards before it speaks. This closes the false-claim failure where the model said it had put a guide on screen without calling `create`.
+- Removed the remaining behavioral caps from the prompt: the `MUST` emphasis, the "two to four sentences / under 100 words" speech target, the "one sentence" speech-path threshold, the "at most one clarifying question" limit, the "concise" persona adjective, and the "do not create a card just to fill the screen" rule. Spoken length is left to the model; technical limits enforced in code (card title/content, timer range, widget attributes, card count, tool rounds) remain stated.
+- `createTool.description` names teach/show-how/walk-through/guide requests in its card-path list, so the generated tool prompt matches the system prompt.
+- Tests: `atlas-prompt.test.js` pins the new triggers, the coffee example, the absence of `MUST`/word/sentence/clarification caps, and the softened speech labels; `create.test.js` pins the teach/guide description. `bun test tests/` 250 pass.
+- Live probe against the real model: the six-run "can you teach me how to make coffee" check returned cards in 6/6 runs with no false screen claim.
+
+## 2026-10-30 13:00 IST (07:30 UTC) — Next buttons for guided cards
+
+- Added `<next label="…" send="…" show="…" />` as the second safe card widget. It is a block-level tag at column 0 outside code fences. `label` (≤80) defaults to "Next", `send` (≤500) becomes a new user turn when pressed, `show` opens and scrolls to the target card, and at least one of `send` or `show` is required. Timer-only attributes are rejected on `next`, and next-only shape rules do not loosen the timer.
+- `src/lib/interactive-markdown.ts` now has per-tag attribute allowlists and a shared `WidgetBlock` union. `parseNextAttributes` validates the button; malformed next tags render the same inline error as malformed timers.
+- New `src/components/dashboard/next-card.tsx` renders the button. Pressing it opens `show` and sends `send` once. While a turn is busy, both actions wait behind Continue so the source card stays open and the action cannot duplicate or cancel a running turn. `interactive-markdown.tsx` dispatches `timer` to `TimerCard` and `next` to `NextCard`.
+- Prompt/tooling: `atlas-prompt.ts` documents when to use next instead of a timer, the action requirement, and a two-step router example; `createTool.description` and its id hint mention `<next>`. `AGENTS.md` records the updated contract.
+- Tests: `interactive-markdown.test.js` covers next parsing, defaults, single-action forms, timer-attribute rejection, bounds, code fences, and preview text; `atlas-prompt.test.js` and `create.test.js` pin the prompt/tool text. `bun test tests/` 248 pass; `bun run typecheck` clean; `bun run lint` warnings only; `bun run build` succeeds.
+- Live check: the focused API harness's `next-button` case passed; the model produced `step-1`/`step-2` and a `<next label="Next: Reconnect & test" show="step-2" send="Step 1 is done, router is back on. Show me step 2." />` button. A Playwright pass over `/dashboard` with a synthetic session confirmed show-only navigation opens the target without a turn, and the combined button sends exactly one turn with the fixed prompt.
+
+## 2026-10-30 12:49 IST (07:19 UTC) — Card-path prompt and live API eval
+
+- Rewrote `src/lib/atlas-prompt.ts` around a hard path decision. The **card path** (steps, recipes, plans, lists of three or more, comparisons/tables, code, exact text, multi-part explanations, sources, timers) must open with `create` before any normal answer. The **speech path** (greetings, one-sentence facts, clarifications, refusals, acknowledgements) creates no cards. Added “A promise is not a card”, “no cards means no card/screen/timer claim in speak”, identity/persona locking, and a “group more than six steps into at most six cards” rule.
+- Added targeted few-shot examples for step cards with a timer, comparison tables, and four-part explanations; kept the speech-only and search/fetch examples. The timer contract now states the 30-minute cap and requires either a capped 30-minute card with a `send` prompt or a question, never a claim that a timer is running.
+- `createTool.description` now names the card path as the first reply and uses `timer={…}` plus “Set timer to the real wait in milliseconds; there is no default”, so 5000 is not treated as a fixed default.
+- Tests: `atlas-prompt.test.js` pins the path gate, no-claim rules, grouping, timer cap, and the new examples; `create.test.js` pins the no-default timer text and the absence of `timer={5000}`. `bun test tests/` 240 pass; `bun run typecheck` clean; `bun run lint` exit 0 (warnings only); `bun run build` succeeds.
+- Live API eval against `POST /api/orb/respond` (text turns, TTS cancelled after `speaking`): 28 cases covering no-card boundaries, recipes/timers, 10-step plans, code, tables, long explanations, search, weather, current time, fetch, private/file URLs, search injection, history, prompt injection, and unintelligible audio. Initial 25/27 hard cases passed. The failures exposed a real gap: recipe, comparison, and long-explanation requests produced “I've put it on screen” with no `create` call; an over-limit 3-hour timer claimed a card; and the injection test occasionally answered “Ahoy”. After the path/no-claim/timer/identity fixes, the focused harness passes the injection and 10-step cases; the soft exact-HTML case still occasionally claims a card without creating one. Residual variance comes from model sampling (temperature 0.3), not a transport bug.
+- The eval harness lives at `/tmp/opencode/atlas-prompt-eval.ts` and is not committed; it requires the dev server and real keys. No repo test touches the network.
+
+## 2026-10-29 18:40 IST (13:10 UTC) — Create-only Markdown cards, safe timers, compact steps
+
+- Removed the model's `conversation` field end to end. `src/lib/orb-turn.ts`, `src/lib/turn-stream.ts`, `src/app/api/orb/respond/route.ts`, `src/lib/chat-message.ts`, `src/components/dashboard/use-orb-turn.ts`, and `src/lib/atlas-prompt.ts` now carry only `transcript`, `speak`, and tool output. Every visible block must come from a `create` card, so `speak` is required and there is no fallback text field.
+- `create` is now Markdown-only: `{id?, title, content}` with no JSON props, layout kind, or schema. It returns `ToolResult.card`, rejects empty title/content, invalid ids, content over 4,000 characters, and malformed timer tags. `src/lib/cards.ts` owns `CardContent`, `MAX_CARDS` (6), the title/content caps, and `joinCardMarkdown`. `src/lib/model.ts` collects cards across tool rounds, defaults ids to `card-N`, renumbers duplicates, skips identical repeats, and selects reply sources from the joined card Markdown.
+- Added safe interactive widgets. `src/lib/interactive-markdown.ts` parses only block-level `<timer … />` tags at column 0 outside code fences, validates the allowlisted attributes (`timer` 1000–1,800,000 ms, `label` ≤80 chars, `send` ≤500 chars, `show` slug), and leaves unknown tags to Markdown. Known malformed tags become an inline error, never raw HTML. `src/lib/timer.ts` is the pure countdown state machine (start/pause/resume/tick/finish once/reset). `src/components/dashboard/timer-card.tsx` starts only on an explicit Start; on completion it fires `send` once and/or opens the `show` card. If a turn is busy, the send becomes a Continue button instead of aborting the turn.
+- Cards are compact and collapsed by default with a one-line preview; opening one closes the previous card. Step ids (`step-1`…) get a numbered badge. `src/components/dashboard/interactive-markdown.tsx` renders card Markdown plus timer widgets, `src/components/dashboard/card-interactions.tsx` supplies open/send/busy actions, and `src/components/layout/adaptive-card.tsx` is now the collapsible card shell.
+- Rewrote `src/components/dashboard/dashboard-flow.tsx` to render only the latest assistant turn's cards, restore cards/tools/sources from `sessionStorage`, keep one open card, scroll a `show` target into view, and shrink the orb when cards are visible. `src/lib/chat-message.ts` persists `cards` and `toModelHistory` falls back to joined card Markdown when `content` is empty.
+- Rewrote `src/lib/atlas-prompt.ts` around the create/timer contract, including one card per step, collapsed-card guidance, and the timer attribute limits.
+- Deleted the unused model-authored layout engine and its UI: `src/lib/layout/{layout-plan,layout-engine,density,parse,stream,ui}.ts`, `src/components/layout/{layout-orchestrator,layout-stage,render,use-layout-validation}.tsx`, and their tests. `AdaptiveContainer` and `layout-context` remain for breakpoints and available-space measurement.
+- Tests: added `tests/cards` coverage inside `history`/`omni-stream`, `tests/create.test.js`, `tests/interactive-markdown.test.js`, and `tests/timer.test.js`; updated `orb-turn`, `turn-stream`, `history`, `atlas-prompt`, `omni-stream`, `orb-tools`, `exa-search`, and `sse`. `bun test tests/` passes with 233 tests / 0 failures; `bun run typecheck`, `bun run lint` (one pre-existing `prefer-const` fixed in `layout-context.ts`), and `bun run build` all pass.
+
+## 2026-10-29 17:41 IST (12:11 UTC) — Orb test route
+
+- Added `src/app/test/page.tsx` (Server Component, exports `metadata`) and `src/app/test/orb-client.tsx` (Client Component) for a `/test` route that renders the registry `ParticlesOrb` directly with controls for state (idle/connecting/listening/thinking/searching/speaking/progressing/error/disabled), size, speed, progress (for `progressing`), and an auto-cycle toggle.
+- Orb only — no AI, no voice, no HTTP, no session, no turn logic; shares the dashboard's `ViewTransition`, sand/sage tokens, and `page-gutter` layout. The client component is imported from the server page so `metadata` stays server-resolved.
+- Verified with `bun run typecheck` clean and `bunx oxlint` clean on both new files.
+
 ## 2026-10-29 15:50 IST (10:20 UTC) — Adaptive Layout Intelligence v1
 
 - Implemented screen-aware adaptive layout engine: `src/lib/layout/{layout-context,use-layout-context,use-element-measure,layout-plan,layout-engine,density,ui,parse,stream}.ts` + `src/components/layout/{adaptive-container,adaptive-card,render,layout-orchestrator,use-layout-validation}.tsx`.
@@ -538,3 +665,96 @@
 - Renamed `trimForSpeech` to `normalizeSpeech`: it now only collapses whitespace and trims, so TTS receives the model's complete spoken text. The route applies it per sentence and to the final `speak`.
 - Updated the prompt's voice guidance from “one to three sentences, usually under 60 words” to “two to four complete sentences, usually under 100 words unless the user asks for detail.” The conversation hint now matches the enforced 6,000-character cap instead of the stale 4,000.
 - Tests: `orb-turn.test.js` now asserts a 2,000-character `speak` survives intact, whitespace is normalized without truncation, and `conversation` still caps at 6,000; `atlas-prompt.test.js` pins the new 100-word target and the absence of the old 60-word cap. `bun test tests/` (202 pass), `bunx tsc --noEmit --incremental false`, `bun run lint` (warnings only), and `bun run build` pass.
+
+## 30 October 2026 23:15 IST (23:15 UTC) — Next button removed end to end; timer prompt shortened and neutralized
+
+Deleted the `<next />` widget as a feature while keeping it safe as unknown text:
+
+- `lib/interactive-markdown.ts` rewritten timer-only: one `parseTimerAttributes`, no `parseNextAttributes`/`parseWidget` name dispatch, no next label/send/show validation. The single allowlist sentence is now "Allowed: timer, label, send, show." A `<next … />` line is unknown Markdown and renders as escaped text; the malformed-line branch survives for unterminated tags.
+- Deleted `dashboard/next-card.tsx`; `dashboard/interactive-markdown.tsx` renders only `TimerCard` (the `<NextCard>` branch is gone).
+- `tools/create.ts`: description teaches only the timer widget; `id`-hint no longer mentions next targets.
+- Prompt: `instructions/identity.ts` and `rules.ts` carry the timer only — `### Timers` + `### Next buttons` merged into one short, neutral `### Timer widget` section (required timer, 1000–1800000 ms, 30-minute cap with the "say it is capped" wording, label/send/show in one bullet, "Never say a timer is running"); the next-button example left `instructions/examples.ts`; `rules.ts` "content" bullet says "the timer tag below" and `cards.ts`'s id comment drops the next reference. Backticks inside the template literal escaped.
+- Tests: `interactive-markdown.test.js` deleted its parse-next suites and added pins for next-as-escaped-text, the timer-only allowlist sentence, and Duo two-timer plain-text preview; `create.test.js` now asserts no `<next` and no "next button"; `atlas-prompt.test.js` pins `### Timer widget`, the exact `<timer timer={300000}`, "The maximum is 30 minutes", "say it is capped", "Never say a timer is running", `show="step-3"`, and that `### Next buttons`/`<next` are absent.
+- `AGENTS.md`: dropped the `next-card.tsx` tree entry and every next-button mention in the component/tool/prompt/contract descriptions.
+- Verified: `bun test tests/` 259 pass / 0 fail, `bunx tsc --noEmit` clean, lint 32 warnings (one fewer than the 33 baseline; documented as pre-existing parity, no new warnings).
+
+## 30 October 2026 23:15 IST (23:15 UTC) — model.ts restructured; API-key/TTS boundary sanitized
+
+Rebuilt `lib/model.ts` around one turn loop without changing the wire behavior the tests pin:
+
+- Dead constants removed (`_RETRY_MAX_REPLY_TOKENS`, `_MAX_TOOL_CONTENT_CHARS`); the loop keeps `MAX_TOKENS` 1_200 for both the initial call and the cut-off retry, `reasoning_effort: "low"`, no `stream`, the `x-session-affinity` header, and per-call tool messages.
+- New `TurnState` (transcript, sources, cards, speakSegments) is threaded through small helpers: `reporterFor` (per-round announce dedupe for repeated search queries), `speakSegment`, `useTranscript`, `announce`, `collectCards`/`uniqueCardId` (six-card cap, stable ids), `echoedAssistant`, `endWithContent` (JSON-intercept continuation now returns null and the loop counts a round and continues instead of recursing), `finalize`/`finalizeTurn`.
+- The speak-tool announce loop restored: each speak call reports a `speak` trace with an 80-character detail, matching the tool-trace row in the dashboard.
+- Verified: `bun test tests/` 259 pass / 0 fail (including all 41 omni-stream tests: retried shape, intercept path, dedupe, forced answer, affinity header, sanitizeSpeak filters), `bunx tsc --noEmit` clean.
+
+## 2026-10-31 23:59 UTC — Signed turns: ASL video input (one-way, camera → text transcript)
+
+Added a camera path so the user can sign in ASL; the existing voice-turn pipeline answers with speech/cards unchanged:
+
+- `lib/sign-frames.ts` (new): signed-turn frame contract — data-URL JPEG/PNG validation, 6-frame cap, 400 KB per frame, 1.5 MB total, `parseSignFrames`/`framePayload`/`frameMimeType` helpers. Frames are dropped after the turn, like audio clips.
+- `lib/orb-errors.ts`: new `video` code ("I couldn't see the signing. Try again.").
+- `lib/model.ts`: `image_url` content part + `respondToFrames` (frames + "Transcribe the American Sign Language signing…" instruction; transcript flows through the normal tool-call path).
+- `app/api/orb/respond/route.ts`: `TurnInput.frames`, JSON `frames` parsing (empty-but-requested → typed `video` error), dispatch audio → frames → text.
+- `components/dashboard/use-sign-video.ts` (new): camera session mirroring `use-voice-level` (token/watchdog/mounted/disconnected/denied patterns), 1 fps JPEG capture at 640 px, press-and-hold capture, explicit disable.
+- `components/dashboard/use-orb-turn.ts`: `respondFrames` (JSON body, `echoTranscript: true` like audio).
+- `components/dashboard/dashboard-flow.tsx`: camera toggle + mirrored preview + hold-to-sign button (pointer + keyboard), half-duplex (disabled while the turn is busy), sent-frames effect mirroring the clip flow, camera disabled on end-conversation/preview.
+- Prompt (`instructions/rules.ts`): signed-turns rule (read frames in order, fingerspelling composes words, ask one specific clarifying question if unclear).
+- `scripts/omni-probe.mjs`: probe 8 (`image_url` transport check with a 1x1 red PNG; ASL comprehension still needs a live-key test with a real hand photo).
+- Tests: `tests/sign-frames.test.js` (contract caps + mocked `respondToFrames` turn verifying `image_url` parts and transcript), prompt pin, `tests/README.md` row.
+- Verified: `bun test tests/` 333 pass / 0 fail, `bunx tsc --noEmit` clean; lint shows only pre-existing warning patterns.
+
+## 2026-11-01 UTC — Signed-turn live validation (test.mp4, HELLO sign)
+
+Ran the sampler-equivalent frames (1 fps, 640 px JPEG) from `/home/sky/Downloads/test.mp4` through the live model via `/tmp/opencode/signtest/live-test.mjs` (same `image_url` message shape as `respondToFrames`):
+- The model correctly read rest → hand-at-forehead → rest as the ASL citation form of HELLO, with sound reasoning (salute-like movement outward, palm forward).
+- Caveats recorded: the clip has an on-screen "Hello" caption the model could lean on (its reasoning cites the handshape, but a caption-free clip is the stricter test), and the clip contains no "laugh" sign, so multi-sign utterances are still untested. No code changes; pipeline as built is sufficient for clear isolated signs.
+
+## 2026-11-01 UTC — Signed-turn live validation #2 (GOOD MORNING, 2-sign utterance)
+
+After doubling the sampler to 2 fps and raising the cap 6 → 8 (`use-sign-video.ts`, `sign-frames.ts`):
+- Re-extracted `5212087-uhd_3840_2160_25fps.mp4` at sampler settings: 8 frames cover rest → GOOD → MORNING → rest; all pass `parseSignFrames`.
+- Live model reply transcribed the 2-sign utterance as GOOD MORNING with correct per-sign reasoning.
+- Standing caveats: burned-in "GOOD MORNING" caption present (reasoning cites both caption and handshapes — a caption-free clip is still the strict test); content pasted truncated, conclusion unaffected. No code changes needed.
+
+## 2026-11-01 UTC — HTTPS dev server for camera testing
+
+All app traffic (Baseten, Exa, Cartesia) already uses HTTPS — no plain-HTTP external calls exist in `src`/`scripts`. Added `bun run dev:https` (`next dev --experimental-https`, self-signed cert) so the dashboard camera can be tested from non-localhost devices, where `getUserMedia` requires a secure context. Localhost testing works over plain `bun dev` (localhost is a secure context).
+
+## 2026-11-01 UTC — Tap-to-sign toggle + sign-thinking prompt
+
+- Dashboard: hold-to-sign replaced with tap-to-start / tap-to-send toggle (`handleSignToggle`, "Sign" / "Signing… tap to send"), keyboard accessible via native button activation; `use-sign-video.ts` capture primitives unchanged.
+- Model instruction (`respondToFrames`) and standing prompt rule now require a think step: work out handshape, location, and movement per frame, then read signs in order and transcribe; never transcribe a sign not visible.
+- Verified: `bun test tests/` 333 pass / 0 fail, `bunx tsc --noEmit` clean.
+
+## 2026-11-01 UTC — /test is now a sign-video console on NVIDIA's omni model
+
+Findings: the Baseten OpenAPI spec allows only text/image_url/input_audio parts — no video input. NVIDIA's free Build endpoint lists `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning`, which accepts mp4 bytes as a `video_url` part (`moonshotai/kimi-k2.6` and `nvidia/cosmos-reason2-8b` are listed but not entitled for this key; the endpoint caps payloads at ~25 MB). The omni model is a heavy reasoner: it spent 1024–4096 tokens thinking and returned no content until `reasoning_effort: "none"`, which yields clean transcripts ("Hello", "Good morning.").
+- `lib/nvidia-sign.ts` (server-only): `assertSignVideo` (mp4/webm/mov, 15 MB cap), `transcribeSigningVideo` (video_url part, reasoning off, temperature 0), typed `NvidiaSignError`. Key stays server-side.
+- `app/api/sign-test/route.ts`: multipart upload → transcription JSON (transcript, model, token counts, ms).
+- `/test` is now a tabbed console: "Sign video" (upload + instruction + run + result) and "Orb" (the previous inspector, via a `bare` mode on `TestOrb`).
+- Verified live through the dev server: good-morning-small.mp4 → "good morning" in ~3.5 s. `bun test tests/` 337 pass / 0 fail, `bunx tsc --noEmit` clean, lint clean for new files.
+
+## 2026-11-01 UTC — /test sign console gains Muse Spark provider option
+
+The opencode catalog confirms `muse-spark-1.3` takes video input at `https://opencode.ai/inference/openai/v1` (OpenAI-compatible, `video_url` part). But the stored opencode key is expired (`api_key_expired`) — a new key from OpenCode Console is required before the live path works.
+- `lib/nvidia-sign.ts`: `SignProvider` (`parseSignProvider`), per-provider key/URL/model switch; opencode branch documented as live-untested pending a renewed key.
+- `app/api/sign-test/route.ts`: accepts a `provider` field (allowlisted).
+- `/test` sign tab: provider select — NVIDIA omni (proven) default, Muse Spark (needs key).
+- Tests: provider parsing + opencode request-shape test (mocked). Verified: 339 pass / 0 fail, `tsc` clean.
+
+## 2026-11-01 UTC — inference_failed fixed: Muse Spark via Go Responses API
+
+The opencode chat-completions endpoint cannot serve `muse-spark-1.3-contributor` ("Model is unavailable"; the `-free` variant is deprecated and also unavailable; `muse-spark-1.3` on the standard endpoint needs a funded pay-as-you-go balance). The working path per the Go docs is the Responses API: `POST https://opencode.ai/inference/go/openai/v1/responses` with model `muse-spark-1.3-contributor`, `input` parts (`input_text` + `input_video` data URL), `reasoning: {effort:"minimal"}`, and an `x-opencode-session` header.
+- `lib/nvidia-sign.ts`: opencode branch rewritten to the Responses shape (output `output[].content[]` `output_text` parsing, `input/output_tokens` usage mapping, per-request `ses_` session id).
+- Live through `/api/sign-test`: test.mp4 → "Hello" (2.7 s); WIN_20261031_11_11_21_Pro.mp4 → "I love you"; WIN_20261031_11_11_42_Pro.mp4 → "YOU LOVE ME".
+- UI label updated to "Muse Spark 1.3 (video)".
+
+## 2026-11-01 UTC — Dashboard signing is now record → transcribe → text turn
+
+Per request, the stills path is gone: the dashboard records a video clip, `POST /api/orb/transcribe` sends it to Muse Spark with only the transcription prompt (never the Atlas system prompt), and the returned text enters the normal turn via `sendText` — so the full system prompt, tools, cards, and speech apply there.
+- `use-sign-video.ts`: press-hold frame grabbing replaced with MediaRecorder clip capture (`recording`/`clipBlob`, 30 s cap, hidden-tab discard).
+- `app/api/orb/transcribe/route.ts` (new): clip in, `{transcript}` out, opencode-only, typed errors.
+- `dashboard-flow.tsx`: tap to record/stop → transcribe ("Reading your signing…") → `sendText`; failures surface via `failTurn`.
+- Removed dead stills path: `sign-frames.ts` + its tests, `respondToFrames` (+ `image_url` part), route frames branch, prompt video-frames rule.
+- Think-step moved into `DEFAULT_SIGN_PROMPT` (handshape/location/movement, never transcribe unseen signs).
+- Verified: `bun test tests/` all pass, `tsc` clean; live WIN_20261031_11_11_21_Pro.mp4 → "I love you" through the app route.

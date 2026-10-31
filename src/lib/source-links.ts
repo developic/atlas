@@ -180,11 +180,11 @@ function clipSources(sources: SourceLink[]): SourceLink[] {
  * list falls back to the hostname.
  */
 export function selectReplySources(
-  conversation: string,
+  markdown: string,
   candidates: readonly SourceLink[],
   limit = 12,
 ): SourceLink[] {
-  const cited = extractSources(conversation, limit);
+  const cited = extractSources(markdown, limit);
 
   if (cited.length === 0 || candidates.length === 0) return clipSources(cited);
 

@@ -5,6 +5,7 @@
  * route validates the `history` field with the same helper. Keeping one copy
  * means the client and server cannot drift on what a stored turn looks like.
  */
+import { isCardContent, joinCardMarkdown, MAX_CARDS, type CardContent } from "./cards";
 import type { SourceLink } from "./source-links";
 import { isToolTrace, type ToolTrace } from "./tool-trace";
 
@@ -18,6 +19,8 @@ export type ChatMessage = {
   sources?: SourceLink[];
   /** Tools the assistant ran for this turn, shown under the reply. */
   tools?: ToolTrace[];
+  /** Markdown cards created by the create tool; the only on-screen content. */
+  cards?: CardContent[];
   timestamp?: number;
 };
 
@@ -54,6 +57,7 @@ export function isChatMessage(value: unknown): value is ChatMessage {
     content?: unknown;
     sources?: unknown;
     tools?: unknown;
+    cards?: unknown;
   };
 
   if (
@@ -76,6 +80,15 @@ export function isChatMessage(value: unknown): value is ChatMessage {
   if (
     message.tools !== undefined &&
     (!Array.isArray(message.tools) || !message.tools.every(isToolTrace))
+  ) {
+    return false;
+  }
+
+  if (
+    message.cards !== undefined &&
+    (!Array.isArray(message.cards) ||
+      message.cards.length > MAX_CARDS ||
+      !message.cards.every(isCardContent))
   ) {
     return false;
   }
@@ -188,7 +201,9 @@ export function toModelHistory(
 ): ModelHistoryMessage[] {
   return messages.map((message) => ({
     role: message.role,
-    content: message.content,
+    content:
+      message.content ||
+      (message.cards?.length ? joinCardMarkdown(message.cards) : ""),
     ...(message.speak ? { speak: message.speak } : {}),
   }));
 }

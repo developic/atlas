@@ -106,7 +106,7 @@ describe("readStringField", () => {
 
   test("ignores field names inside another string", () => {
     const text =
-      '{"conversation":"the word \\"speak\\": is here","speak":"real"}';
+      '{"note":"the word \\"speak\\": is here","speak":"real"}';
 
     expect(readStringField(text, "speak")).toEqual({
       value: "real",

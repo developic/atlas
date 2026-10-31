@@ -12,6 +12,8 @@
  *   5. reasoning_effort high vs omitted
  *   6. a generated 16 kHz WAV via input_audio
  *   7. response_format: json_schema (evidence for schema mode)
+ *   8. an image_url still (transport check for signed turns: a red square
+ *      the model should describe; ASL comprehension needs a real hand photo)
  *
  * Exits non-zero only when the baseline request fails, so the probe is safe to
  * run while the rest of the app is being upgraded.
@@ -337,6 +339,36 @@ async function main() {
           },
         },
       },
+    });
+    const payload = await readJson(response);
+
+    console.log(`status ${response.status}`);
+    console.log(JSON.stringify(contentOf(payload)).slice(0, 500));
+    console.log(preview(payload?.raw));
+  } catch (error) {
+    console.error(error);
+  }
+
+  // 8. image_url still (signed-turn transport).
+  // A 1x1 red PNG only proves the part is accepted; describing real signing
+  // needs a real hand photo, which this probe does not ship.
+  log("8. image_url still");
+  try {
+    const red =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const response = await post({
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image_url", image_url: { url: `data:image/png;base64,${red}` } },
+            { type: "text", text: "What color is the square in one word?" },
+          ],
+        },
+      ],
+      max_tokens: 60,
+      temperature: 0.2,
+      reasoning_effort: "high",
     });
     const payload = await readJson(response);
 

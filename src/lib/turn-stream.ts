@@ -5,9 +5,10 @@
  * the final speaking event. Keeping the loop here means adding an event never
  * means editing two copies in the dashboard.
  */
+import { isCardContent, type CardContent } from "./cards";
 import { ORB_ERROR_CODES, type OrbErrorCode } from "./orb-errors";
-import type { LayoutPlan } from "./layout/layout-plan";
 import type { SourceLink } from "./source-links";
+import { isTurnDebug, type TurnDebug } from "./turn-debug";
 
 /**
  * The route's NDJSON contract, enforced on both sides.
@@ -17,6 +18,9 @@ import type { SourceLink } from "./source-links";
  * the client is not prepared for. There is no upfront `thinking` frame: the
  * dashboard already starts a turn in that state, and every later status is
  * triggered by something the model actually did.
+ *
+ * The final `speaking` event carries the cards built by the create tool. There
+ * is no conversation field: Markdown cards are the only on-screen content.
  */
 export type TurnEvent =
   | { status: "transcript"; transcript: string }
@@ -26,18 +30,14 @@ export type TurnEvent =
   | { status: "audio"; pcm: string; sampleRate: number; seq: number }
   | { status: "audio-done" }
   | { status: "audio-mp3"; audio: string }
-  | { status: "layout_plan"; plan: { version: 1; density: string; fallback: string; components: Array<{ id: string; kind: string; title?: string; priority: number; placement: string; minW: number; maxW: number | null; minH: number; essential: boolean }> } }
-  | { status: "layout_card"; card: LayoutPlan["components"][number] }
-  | { status: "layout_card_delta"; id: string; delta: string; append: "content" | "props" }
-  | { status: "layout_card_state"; id: string; state: "collapsed" | "preview" | "expanded" | "docked" | "fullscreen" }
-  | { status: "layout_update"; op: "reflow" | "replace" | "remove"; targetId: string; card?: LayoutPlan["components"][number] }
   | {
       status: "speaking";
       transcript: string;
       speak: string;
-      conversation: string;
+      cards?: CardContent[];
       sources?: SourceLink[];
-      layout?: LayoutPlan;
+      /** Raw model rounds, attached only for explicitly debugged turns. */
+      debug?: TurnDebug;
     }
   | { status: "error"; code: OrbErrorCode; message: string };
 
@@ -53,11 +53,11 @@ export type TurnStreamHandlers = {
   onAudioDone?: () => void;
   onAudioMp3?: (audio: string) => void;
   onSpeaking?: (event: SpeakingEvent) => void;
-  onLayoutPlan?: (plan: { version: 1; density: string; fallback: string; components: Array<{ id: string; kind: string; title?: string; priority: number; placement: string; minW: number; maxW: number | null; minH: number; essential: boolean }> }) => void;
-  onLayoutCard?: (card: LayoutPlan["components"][number]) => void;
-  onLayoutCardDelta?: (p: { id: string; delta: string; append: "content" | "props" }) => void;
-  onLayoutCardState?: (p: { id: string; state: "collapsed" | "preview" | "expanded" | "docked" | "fullscreen" }) => void;
-  onLayoutUpdate?: (p: { op: "reflow" | "replace" | "remove"; targetId: string; card?: LayoutPlan["components"][number] }) => void;
+  /**
+   * Debug tap: every valid event, before it is dispatched. The error frame
+   * arrives here before `readTurnStream` throws, so a panel sees it.
+   */
+  onEvent?: (event: TurnEvent) => void;
 };
 
 export class TurnStreamError extends Error {
@@ -124,21 +124,12 @@ function isTurnEvent(value: unknown): value is TurnEvent {
       );
     case "audio-mp3":
       return typeof event.audio === "string" && event.audio.length > 0;
-    case "layout_plan":
-      return typeof event.plan === "object" && event.plan !== null;
-    case "layout_card":
-      return typeof event.card === "object" && event.card !== null;
-    case "layout_card_delta":
-      return typeof event.id === "string" && typeof event.delta === "string";
-    case "layout_card_state":
-      return typeof event.id === "string" && typeof event.state === "string";
-    case "layout_update":
-      return typeof event.op === "string" && typeof event.targetId === "string";
     case "speaking":
       return (
         typeof event.transcript === "string" &&
         typeof event.speak === "string" &&
-        typeof event.conversation === "string" &&
+        (event.cards === undefined ||
+          (Array.isArray(event.cards) && event.cards.every(isCardContent))) &&
         (event.sources === undefined ||
           (Array.isArray(event.sources) &&
             event.sources.every(isSourceLink)))
@@ -148,6 +139,23 @@ function isTurnEvent(value: unknown): value is TurnEvent {
     default:
       return false;
   }
+}
+
+/**
+ * A malformed debug field must not cost the client a valid reply. Keep the
+ * event, drop the field; the panel simply shows no model rounds.
+ */
+function sanitizeDebug(event: TurnEvent): TurnEvent {
+  if (
+    event.status !== "speaking" ||
+    event.debug === undefined ||
+    isTurnDebug(event.debug)
+  ) {
+    return event;
+  }
+
+  const { debug: _debug, ...rest } = event;
+  return rest;
 }
 
 export async function readTurnStream(
@@ -185,49 +193,37 @@ export async function readTurnStream(
 
       if (!isTurnEvent(payload)) continue;
 
-      switch (payload.status) {
+      const event = sanitizeDebug(payload);
+      handlers.onEvent?.(event);
+
+      switch (event.status) {
         case "transcript":
-          handlers.onTranscript?.(payload.transcript);
+          handlers.onTranscript?.(event.transcript);
           break;
         case "searching":
-          handlers.onSearching?.(payload.query);
+          handlers.onSearching?.(event.query);
           break;
         case "tool":
-          handlers.onTool?.(payload.tool, payload.detail);
+          handlers.onTool?.(event.tool, event.detail);
           break;
         case "speak-delta":
-          handlers.onSpeakDelta?.(payload.text);
+          handlers.onSpeakDelta?.(event.text);
           break;
         case "audio":
-          handlers.onAudio?.(payload.pcm, payload.sampleRate);
+          handlers.onAudio?.(event.pcm, event.sampleRate);
           break;
         case "audio-done":
           handlers.onAudioDone?.();
           break;
         case "audio-mp3":
-          handlers.onAudioMp3?.(payload.audio);
-          break;
-        case "layout_plan":
-          handlers.onLayoutPlan?.(payload.plan as never);
-          break;
-        case "layout_card":
-          handlers.onLayoutCard?.(payload.card as never);
-          break;
-        case "layout_card_delta":
-          handlers.onLayoutCardDelta?.(payload as never);
-          break;
-        case "layout_card_state":
-          handlers.onLayoutCardState?.(payload as never);
-          break;
-        case "layout_update":
-          handlers.onLayoutUpdate?.(payload as never);
+          handlers.onAudioMp3?.(event.audio);
           break;
         case "speaking":
-          finalEvent = payload;
-          handlers.onSpeaking?.(payload);
+          finalEvent = event;
+          handlers.onSpeaking?.(event);
           break;
         case "error":
-          throw new TurnStreamError(payload.message, payload.code);
+          throw new TurnStreamError(event.message, event.code);
       }
     }
   }

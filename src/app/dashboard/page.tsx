@@ -14,7 +14,7 @@ export const metadata: Metadata = {
 export default function DashboardPage() {
   return (
     <ViewTransition {...routeTransition}>
-      <main className="page-gutter relative isolate flex min-h-dvh flex-1 items-center justify-center overflow-x-clip bg-sand pt-[max(2rem,env(safe-area-inset-top))] pb-[max(2rem,env(safe-area-inset-bottom))]">
+      <main className="page-gutter relative isolate flex min-h-[calc(100dvh-1rem)] flex-1 items-center justify-center overflow-x-clip bg-sand py-2">
         <AdaptiveContainer>
           <OrbBackdrop />
           <DashboardFlow />

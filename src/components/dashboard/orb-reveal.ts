@@ -2,7 +2,7 @@
  * When a turn's already-received text becomes visible.
  *
  * The happy path holds the first PCM chunks until the full `speaking` text
- * arrives, so the caption, conversation message, and first scheduled audio all
+ * arrives, so the caption, cards, and first scheduled audio all
  * land in the same tick. A turn that fails after `speaking` still has its text,
  * so the reply is revealed with the error instead of being dropped.
  */

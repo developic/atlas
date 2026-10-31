@@ -1,4 +1,4 @@
-import type { OrbTool, ToolResult } from "./types";
+import type { OrbTool, ToolOutcome } from "./types";
 
 export const currentTimeTool: OrbTool = {
   type: "function",
@@ -44,6 +44,6 @@ export function currentTime(args: Record<string, string>): string {
 
 export async function runCurrentTime(
   args: Record<string, string>,
-): Promise<ToolResult> {
-  return { content: currentTime(args), sources: [] };
+): Promise<ToolOutcome> {
+  return { ok: true, result: { content: currentTime(args), sources: [] } };
 }

@@ -195,6 +195,8 @@ export async function* synthesizeSpeechStream(
     throw new OrbError("tts", "Cartesia returned no audio stream.");
   }
 
+  let yielded = 0;
+
   try {
     for await (const data of parseSseStream(response)) {
       let event: {
@@ -214,14 +216,28 @@ export async function* synthesizeSpeechStream(
 
       if (event.type === "chunk") {
         if (typeof event.data === "string" && event.data.length > 0) {
+          yielded += 1;
           yield Buffer.from(event.data, "base64");
         }
 
-        if (event.done) return;
+        if (event.done) {
+          if (yielded === 0) {
+            throw new OrbError("tts", "Cartesia returned an empty audio stream.");
+          }
+
+          return;
+        }
+
         continue;
       }
 
-      if (event.type === "done") return;
+      if (event.type === "done") {
+        if (yielded === 0) {
+          throw new OrbError("tts", "Cartesia returned an empty audio stream.");
+        }
+
+        return;
+      }
 
       if (event.type === "error") {
         throw new OrbError(
@@ -232,6 +248,10 @@ export async function* synthesizeSpeechStream(
             "Cartesia returned an error frame.",
         );
       }
+    }
+
+    if (yielded === 0) {
+      throw new OrbError("tts", "Cartesia returned an empty audio stream.");
     }
   } catch (error) {
     if (error instanceof OrbError) throw error;

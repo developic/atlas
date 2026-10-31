@@ -5,6 +5,12 @@ import {
   TurnStreamError,
 } from "../src/lib/turn-stream.ts";
 
+const CARD = {
+  id: "step-1",
+  title: "Boil the water",
+  content: "Heat the water to 93°C.",
+};
+
 function ndjson(...lines) {
   const encoder = new TextEncoder();
 
@@ -34,7 +40,7 @@ describe("readTurnStream", () => {
         '{"status":"searching"}',
         '{"status":"speak-delta","text":"Hi "}',
         '{"status":"audio","pcm":"AAAA","sampleRate":24000,"seq":0}',
-        '{"status":"speaking","transcript":"hello","speak":"Hi there.","conversation":"Hi there."}',
+        `{"status":"speaking","transcript":"hello","speak":"Hi there.","cards":[${JSON.stringify(CARD)}]}`,
         '{"status":"audio-done"}',
       ),
       {
@@ -55,7 +61,7 @@ describe("readTurnStream", () => {
       "final:Hi there.",
       "done",
     ]);
-    expect(final.conversation).toBe("Hi there.");
+    expect(final.cards).toEqual([CARD]);
   });
 
   test("dispatches each event kind with its own payload", async () => {
@@ -68,7 +74,7 @@ describe("readTurnStream", () => {
         '{"status":"speak-delta","text":"It is "}',
         '{"status":"audio","pcm":"AAAA","sampleRate":24000,"seq":2}',
         '{"status":"audio-done"}',
-        '{"status":"speaking","transcript":"what time is it?","speak":"It is noon.","conversation":"It is **noon**.","sources":[{"url":"https://a.test","title":"A"}]}',
+        `{"status":"speaking","transcript":"what time is it?","speak":"It is noon.","cards":[${JSON.stringify(CARD)}],"sources":[{"url":"https://a.test","title":"A"}]}`,
       ),
       {
         onTranscript: (text) => seen.push({ transcript: text }),
@@ -78,7 +84,11 @@ describe("readTurnStream", () => {
         onAudio: (pcm, sampleRate) => seen.push({ pcm, sampleRate }),
         onAudioDone: () => seen.push("done"),
         onSpeaking: (event) =>
-          seen.push({ speak: event.speak, sources: event.sources }),
+          seen.push({
+            speak: event.speak,
+            cards: event.cards,
+            sources: event.sources,
+          }),
       },
     );
 
@@ -92,14 +102,18 @@ describe("readTurnStream", () => {
       { delta: "It is " },
       { pcm: "AAAA", sampleRate: 24000 },
       "done",
-      { speak: "It is noon.", sources: [{ url: "https://a.test", title: "A" }] },
+      {
+        speak: "It is noon.",
+        cards: [CARD],
+        sources: [{ url: "https://a.test", title: "A" }],
+      },
     ]);
     expect(final.status).toBe("speaking");
     expect(final.transcript).toBe("what time is it?");
-    expect(final.conversation).toBe("It is **noon**.");
+    expect(final.cards).toEqual([CARD]);
   });
 
-  test("ignores events whose payload does not match the contract", async () => {
+  test("ignores events whose payload or cards do not match the contract", async () => {
     const seen = [];
     const final = await readTurnStream(
       responseFor(
@@ -112,9 +126,11 @@ describe("readTurnStream", () => {
         '{"status":"error","code":"not-a-code","message":"bad frame"}',
         '{"status":"teleport"}',
         '{"status":"thinking"}',
-        '{"status":"speaking","transcript":"hi","speak":"Hi.","conversation":"Hi.","sources":"nope"}',
-        '{"status":"speaking","transcript":"hi","speak":"Hi.","conversation":"Hi.","sources":[{"title":"no url"}]}',
-        '{"status":"speaking","transcript":"hi","speak":"Hi.","conversation":"Hi."}',
+        '{"status":"speaking","transcript":"hi","speak":"Hi.","sources":"nope"}',
+        '{"status":"speaking","transcript":"hi","speak":"Hi.","sources":[{"title":"no url"}]}',
+        '{"status":"speaking","transcript":"hi","speak":"Hi.","cards":"nope"}',
+        '{"status":"speaking","transcript":"hi","speak":"Hi.","cards":[{"id":"","title":"A","content":"B"}]}',
+        '{"status":"speaking","transcript":"hi","speak":"Hi.","cards":[{"id":"a","title":"A","content":"B"}]}',
       ),
       {
         onTranscript: (text) => seen.push(`transcript:${text}`),
@@ -126,13 +142,26 @@ describe("readTurnStream", () => {
 
     expect(seen).toEqual([]);
     expect(final.speak).toBe("Hi.");
+    expect(final.cards).toEqual([{ id: "a", title: "A", content: "B" }]);
+  });
+
+  test("requires speak; an older conversation-only frame is ignored", async () => {
+    const final = await readTurnStream(
+      responseFor(
+        '{"status":"speaking","transcript":"hi","conversation":"Old text."}',
+        '{"status":"speaking","transcript":"hi","speak":"Hi."}',
+      ),
+    );
+
+    expect(final.speak).toBe("Hi.");
+    expect(final.cards).toBeUndefined();
   });
 
   test("dispatches the MP3 fallback after the text event", async () => {
     const seen = [];
     await readTurnStream(
       responseFor(
-        '{"status":"speaking","transcript":"ok","speak":"ok","conversation":"ok"}',
+        '{"status":"speaking","transcript":"ok","speak":"ok"}',
         '{"status":"audio-mp3","audio":"data:audio/mpeg;base64,AAAA"}',
       ),
       {
@@ -171,10 +200,64 @@ describe("readTurnStream", () => {
     const final = await readTurnStream(
       responseFor(
         "not json",
-        '{"status":"speaking","transcript":"ok","speak":"ok","conversation":"ok"}',
+        '{"status":"speaking","transcript":"ok","speak":"ok"}',
       ),
     );
 
     expect(final.speak).toBe("ok");
+  });
+
+  test("returns raw model rounds when the final event carries them", async () => {
+    const debug = {
+      rounds: [
+        {
+          round: 1,
+          atMs: 120,
+          ms: 118,
+          tools: true,
+          response: {
+            model: "meta-models/muse-spark-open-1026",
+            choices: [{ message: { content: "" }, finish_reason: "tool_calls" }],
+          },
+        },
+      ],
+    };
+
+    const final = await readTurnStream(
+      responseFor(
+        `{"status":"speaking","transcript":"hi","speak":"Hi.","debug":${JSON.stringify(debug)}}`,
+      ),
+    );
+
+    expect(final.debug).toEqual(debug);
+  });
+
+  test("drops malformed debug data without losing the reply", async () => {
+    const final = await readTurnStream(
+      responseFor(
+        '{"status":"speaking","transcript":"hi","speak":"Hi.","debug":"nope"}',
+      ),
+    );
+
+    expect(final.speak).toBe("Hi.");
+    expect(final.debug).toBeUndefined();
+  });
+
+  test("taps every valid event, including an error before it throws", async () => {
+    const seen = [];
+    const error = await readTurnStream(
+      responseFor(
+        '{"status":"transcript","transcript":"hi"}',
+        '{"status":"tool","tool":"websearch","detail":"next.js"}',
+        '{"status":"error","code":"busy","message":"Try again."}',
+      ),
+      {
+        onEvent: (event) => seen.push(event.status),
+      },
+    ).catch((caught) => caught);
+
+    expect(seen).toEqual(["transcript", "tool", "error"]);
+    expect(error).toBeInstanceOf(TurnStreamError);
+    expect(error.code).toBe("busy");
   });
 });

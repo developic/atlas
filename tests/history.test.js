@@ -107,6 +107,31 @@ describe("isChatMessage", () => {
       }),
     ).toBe(false);
   });
+
+  test("accepts cards and rejects an empty or oversized card list", () => {
+    const card = { id: "step-1", title: "Step", content: "Body" };
+
+    expect(
+      isChatMessage({ role: "assistant", content: "hi", cards: [card] }),
+    ).toBe(true);
+    expect(
+      isChatMessage({
+        role: "assistant",
+        content: "hi",
+        cards: [{ ...card, id: "" }],
+      }),
+    ).toBe(false);
+    expect(
+      isChatMessage({
+        role: "assistant",
+        content: "hi",
+        cards: Array.from({ length: 7 }, (_, index) => ({
+          ...card,
+          id: `step-${index}`,
+        })),
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("parseHistory", () => {
@@ -192,6 +217,36 @@ describe("toModelHistory", () => {
     ).toEqual([
       { role: "user", content: "q" },
       { role: "assistant", content: "a", speak: "a" },
+    ]);
+  });
+
+  test("speak segments round-trip through history", () => {
+    const msgs = [{ role: "assistant", content: "Hi", speak: "Hello. How are you?", cards: [] }];
+    const trimmed = trimHistory(msgs);
+    const model = toModelHistory(trimmed);
+    expect(model[0].speak).toBe("Hello. How are you?");
+  });
+
+  test("falls back to joined card Markdown when content is empty", () => {
+    expect(
+      toModelHistory([
+        {
+          role: "assistant",
+          content: "",
+          speak: "Two steps.",
+          cards: [
+            { id: "step-1", title: "Boil", content: "Heat the water." },
+            { id: "step-2", title: "Brew", content: "Pour the water." },
+          ],
+        },
+      ]),
+    ).toEqual([
+      {
+        role: "assistant",
+        content:
+          "## Boil\n\nHeat the water.\n\n## Brew\n\nPour the water.",
+        speak: "Two steps.",
+      },
     ]);
   });
 });

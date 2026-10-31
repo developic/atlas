@@ -131,15 +131,22 @@ describe("Cartesia requests", () => {
 
     await synthesizeSpeech("Hello.", { voice: "gemma", pace: "brisk" });
 
-    for await (const chunk of synthesizeSpeechStream("Hello.", {
-      voice: "gemma",
-      pace: "brisk",
-    })) {
-      // Drain the generator; the fake response has no SSE frames.
-      expect(chunk).toBeDefined();
-    }
+    // The fake response has no SSE frames, so the stream must fail loudly
+    // instead of ending silently (silence used to trigger a slow MP3
+    // fallback with no recorded cause).
+    const drain = (async () => {
+      for await (const chunk of synthesizeSpeechStream("Hello.", {
+        voice: "gemma",
+        pace: "brisk",
+      })) {
+        expect(chunk).toBeDefined();
+      }
+    })();
 
-    expect(seen).toHaveLength(2);
+    const error = await drain.catch((caught) => caught);
+
+    expect(error?.code).toBe("tts");
+    expect(error?.message).toContain("empty audio stream");
 
     const [bytes, stream] = seen;
 
@@ -181,5 +188,51 @@ describe("Cartesia requests", () => {
     } else {
       process.env.CARTESIA_API_KEY = realKey;
     }
+  });
+});
+
+describe("speak-in-loop streaming", () => {
+  test("two speak calls in one round fire onSpeakDelta for each and concatenate", async () => {
+    const { respondToText } = await import("../src/lib/model.ts");
+    const originalFetch = globalThis.fetch;
+
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call_a",
+                    type: "function",
+                    function: { name: "speak", arguments: JSON.stringify({ text: "First segment." }) },
+                  },
+                  {
+                    id: "call_b",
+                    type: "function",
+                    function: { name: "speak", arguments: JSON.stringify({ text: "Second segment." }) },
+                  },
+                ],
+              },
+              finish_reason: "tool_calls",
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    };
+
+    const deltas = [];
+    process.env.BASETEN_API_KEY = "test-key";
+    const turn = await respondToText("hello", [], { onSpeakDelta: (d) => deltas.push(d) });
+    expect(deltas).toEqual(["First segment.", "Second segment."]);
+    expect(turn.speak).toBe("First segment. Second segment.");
+    expect(calls).toBe(1);
+
+    globalThis.fetch = originalFetch;
   });
 });

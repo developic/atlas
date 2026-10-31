@@ -9,7 +9,8 @@
  * addresses. Page text is untrusted data: this module fences it before the
  * model sees it.
  */
-import { CITATION_INSTRUCTION, type OrbTool, type ToolResult } from "./types";
+import { OrbError } from "../orb-errors";
+import { CITATION_INSTRUCTION, type OrbTool, type ToolOutcome } from "./types";
 
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_REDIRECTS = 3;
@@ -100,35 +101,46 @@ function isBlockedHostname(hostname: string): boolean {
   );
 }
 
+/** A value with no scheme that still looks like a web address. */
+const SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+const BARE_HOST_PATTERN = /^(localhost(\.localhost)?|[\w~.-]+\.[\w~.-]+)(:\d+)?([/?#]\S*)?$/i;
+
 /** Validate one public web URL before any request is made. */
 export function assertFetchableUrl(raw: string): URL {
   const trimmed = raw.trim();
 
-  if (!trimmed) throw new Error("The URL was empty.");
-  if (trimmed.length > MAX_URL_CHARS) throw new Error("The URL was too long.");
+  if (!trimmed) throw new OrbError("validation", "The URL was empty.");
+  if (trimmed.length > MAX_URL_CHARS) throw new OrbError("validation", "The URL was too long.");
+
+  // A link without a scheme ("example.com/docs") is fetched over https.
+  // Anything with an explicit non-web scheme still fails below.
+  const candidate =
+    !SCHEME_PATTERN.test(trimmed) && BARE_HOST_PATTERN.test(trimmed)
+      ? `https://${trimmed}`
+      : trimmed;
 
   let url: URL;
 
   try {
-    url = new URL(trimmed);
+    url = new URL(candidate);
   } catch {
-    throw new Error("The URL was not valid.");
+    throw new OrbError("validation", "The URL was not valid.");
   }
 
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("Only http and https URLs can be fetched.");
+    throw new OrbError("validation", "Only http and https URLs can be fetched.");
   }
 
   if (url.username || url.password) {
-    throw new Error("URLs with credentials are not allowed.");
+    throw new OrbError("validation", "URLs with credentials are not allowed.");
   }
 
   if (url.port && url.port !== "80" && url.port !== "443") {
-    throw new Error("Only standard web ports are allowed.");
+    throw new OrbError("validation", "Only standard web ports are allowed.");
   }
 
   if (isBlockedHostname(url.hostname)) {
-    throw new Error("That host is not available for fetching.");
+    throw new OrbError("validation", "That host is not available for fetching.");
   }
 
   return url;
@@ -340,7 +352,7 @@ async function readBody(response: Response, limit: number): Promise<string> {
   const declared = Number(response.headers.get("content-length") ?? "");
 
   if (Number.isFinite(declared) && declared > limit) {
-    throw new Error("The page was too large.");
+    throw new OrbError("fetch_failed", "The page was too large.");
   }
 
   if (!response.body) return "";
@@ -359,7 +371,7 @@ async function readBody(response: Response, limit: number): Promise<string> {
 
       if (total > limit) {
         await reader.cancel().catch(() => {});
-        throw new Error("The page was too large.");
+        throw new OrbError("fetch_failed", "The page was too large.");
       }
 
       chunks.push(value);
@@ -412,27 +424,27 @@ export async function fetchPage(
       });
     } catch (error) {
       if (isAbortError(error)) {
-        throw new Error("The page took too long to load.");
+        throw new OrbError("fetch_failed", "The page took too long to load.");
       }
 
-      throw new Error("The page could not be reached.");
+      throw new OrbError("fetch_failed", "The page could not be reached.");
     }
 
     if (isRedirect(response.status)) {
       if (hop === MAX_REDIRECTS) {
-        throw new Error("The page redirected too many times.");
+        throw new OrbError("fetch_failed", "The page redirected too many times.");
       }
 
       const location = response.headers.get("location");
 
-      if (!location) throw new Error("The page redirect had no destination.");
+      if (!location) throw new OrbError("fetch_failed", "The page redirect had no destination.");
 
       let next: URL;
 
       try {
         next = new URL(location, current);
       } catch {
-        throw new Error("The page redirected to an invalid URL.");
+        throw new OrbError("fetch_failed", "The page redirected to an invalid URL.");
       }
 
       current = assertFetchableUrl(next.href);
@@ -441,18 +453,18 @@ export async function fetchPage(
 
     if (!response.ok) {
       if (response.status === 404) {
-        throw new Error("The page was not found (HTTP 404).");
+        throw new OrbError("fetch_failed", "The page was not found (HTTP 404).");
       }
 
       if (response.status === 401 || response.status === 403) {
-        throw new Error(`The page is not accessible (HTTP ${response.status}).`);
+        throw new OrbError("fetch_failed", `The page is not accessible (HTTP ${response.status}).`);
       }
 
       if (response.status === 429) {
-        throw new Error("The page is rate-limiting requests (HTTP 429).");
+        throw new OrbError("fetch_failed", "The page is rate-limiting requests (HTTP 429).");
       }
 
-      throw new Error(`The page returned HTTP ${response.status}.`);
+      throw new OrbError("fetch_failed", `The page returned HTTP ${response.status}.`);
     }
 
     const contentType = baseContentType(
@@ -460,7 +472,8 @@ export async function fetchPage(
     );
 
     if (!isSupportedContentType(contentType)) {
-      throw new Error(
+      throw new OrbError(
+        "fetch_failed",
         `That page type is not supported (${contentType || "unknown"}).`,
       );
     }
@@ -472,7 +485,7 @@ export async function fetchPage(
       options.focus,
     );
 
-    if (!text) throw new Error("The page had no readable text.");
+    if (!text) throw new OrbError("fetch_failed", "The page had no readable text.");
 
     return {
       url: current.href,
@@ -481,7 +494,7 @@ export async function fetchPage(
     };
   }
 
-  throw new Error("The page redirected too many times.");
+  throw new OrbError("fetch_failed", "The page redirected too many times.");
 }
 
 export const webfetchTool: OrbTool = {
@@ -497,7 +510,7 @@ export const webfetchTool: OrbTool = {
         url: {
           type: "string",
           description:
-            "The http or https URL to read, copied exactly from the user or from a search result. Never invent or guess a URL.",
+            "The page to read. Pass the full http or https URL, copied exactly from the user or from a search result. When the user writes the link without a scheme (example.com/docs), add https:// before passing it. Never invent or guess a URL.",
         },
         focus: {
           type: ["string", "null"],
@@ -551,22 +564,19 @@ export function formatFetchedPage(page: FetchedPage): string {
 }
 
 /**
- * Run the web fetch tool. Never throws: a failure is returned as text the model
- * can read and explain, so one unavailable tool cannot kill the turn. A fetched
- * page keeps its URL and title so the panel can cite it.
+ * Run the web fetch tool. Never throws: a runtime failure is returned as
+ * ok:false with model-readable text, and completes the ledger execution as
+ * FAILED so it can never be presented as evidence the page was read. A
+ * fetched page keeps its URL and title so the panel can cite it.
  */
 export async function runWebfetch(
   args: Record<string, string>,
   signal?: AbortSignal,
-): Promise<ToolResult> {
+): Promise<ToolOutcome> {
   const url = args.url?.trim();
 
   if (!url) {
-    return {
-      content:
-        "webfetch needs a non-empty url. Copy the exact http or https URL from the user or from a search result.",
-      sources: [],
-    };
+    return { ok: false, error: "webfetch needs a non-empty url. Copy the exact http or https URL from the user or from a search result." };
   }
 
   try {
@@ -575,24 +585,19 @@ export async function runWebfetch(
       signal,
     });
 
-    return {
+    return { ok: true, result: {
       content: formatFetchedPage(page),
-      sources: [
-        {
-          url: page.url,
-          ...(page.title ? { title: page.title } : {}),
-        },
-      ],
-    };
+      sources: [{ url: page.url, ...(page.title ? { title: page.title } : {}) }],
+    }};
   } catch (error) {
     console.error("Web fetch failed", error);
 
     const reason =
       error instanceof Error ? error.message : "the page could not be read";
 
-    return {
-      content: `Web fetch failed for ${JSON.stringify(url)}: ${reason} Do not claim to have read the page. Answer from what you already know or say the page could not be read.`,
-      sources: [],
-    };
+    // ok:false so the ledger records the execution as failed: the model may
+    // say the fetch failed, but can never present this run as evidence that
+    // the page was read.
+    return { ok: false, error: `Web fetch failed for ${JSON.stringify(url)}: ${reason} Do not claim to have read the page. Answer from what you already know or say the page could not be read.` };
   }
 }

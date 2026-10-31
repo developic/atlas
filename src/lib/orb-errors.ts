@@ -12,8 +12,11 @@ export const ORB_ERROR_CODES = [
   "invalid_json",
   "no_reply",
   "audio",
+  "video",
   "tts",
   "config",
+  "validation",
+  "fetch_failed",
 ] as const;
 
 export type OrbErrorCode = (typeof ORB_ERROR_CODES)[number];
@@ -38,8 +41,11 @@ const USER_MESSAGES: Record<OrbErrorCode, string> = {
   invalid_json: "The assistant couldn’t finish that answer. Try again.",
   no_reply: "The assistant didn’t have a reply. Try again.",
   audio: "I couldn’t process that clip. Try again.",
+  video: "I couldn’t see the signing. Try again.",
   tts: "I couldn't generate the voice reply. Try again.",
   config: "The assistant is unavailable right now.",
+  validation: "That request was not valid. Try again.",
+  fetch_failed: "The page could not be reached. Try again.",
 };
 
 export function userMessageFor(error: unknown): string {

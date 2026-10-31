@@ -19,6 +19,10 @@ export function useLayoutContext(): LayoutContext {
   return ctx;
 }
 
+export function useOptionalLayoutContext(): LayoutContext | null {
+  return useContext(LayoutContextInternal);
+}
+
 function readSafeArea(): { top: number; right: number; bottom: number; left: number } {
   if (typeof window === "undefined") return { top: 0, right: 0, bottom: 0, left: 0 };
   const s = getComputedStyle(document.documentElement);

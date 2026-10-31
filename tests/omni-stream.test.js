@@ -12,52 +12,42 @@ const realFetch = globalThis.fetch;
 const realExaKey = process.env.EXA_API_KEY;
 let requests = [];
 
-function sseResponse(events) {
-  const encoder = new TextEncoder();
-  const body = new ReadableStream({
-    start(controller) {
-      for (const event of events) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
-      }
-
-      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-      controller.close();
-    },
-  });
-
-  return new Response(body, {
-    status: 200,
-    headers: { "Content-Type": "text/event-stream" },
-  });
-}
-
-function contentEvent(content) {
-  return { choices: [{ delta: { content } }] };
-}
-
-function finishEvent(reason) {
-  return { choices: [{ delta: {}, finish_reason: reason }] };
-}
-
-function finalTurn(turn) {
-  return sseResponse([
-    contentEvent(JSON.stringify(turn)),
-    finishEvent("stop"),
-  ]);
-}
-
-function jsonTurn(turn) {
+function nativeToolResponse(calls, opts = {}) {
+  const { finishReason = "tool_calls", usage, model } = opts;
   return new Response(
     JSON.stringify({
       choices: [
         {
-          message: { content: JSON.stringify(turn) },
-          finish_reason: "stop",
+          message: {
+            content: "",
+            tool_calls: calls.map((c, i) => ({
+              id: c.id ?? `call_${i}`,
+              type: "function",
+              function: { name: c.name, arguments: JSON.stringify(c.arguments ?? {}) },
+            })),
+          },
+          finish_reason: finishReason,
         },
       ],
+      usage: usage ?? {},
+      model: model ?? "meta-models/muse-spark-open-1026",
     }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
+}
+
+function finalTurn(turn, opts = {}) {
+  const args = { text: turn.speak ?? "", ...(turn.evidence ? { evidence: turn.evidence } : {}) };
+  if (turn.transcript) args.transcript = turn.transcript;
+  return nativeToolResponse([{ name: "speak", arguments: args, id: turn.id }], opts);
+}
+
+function cardTurn(card, opts = {}) {
+  return nativeToolResponse([{ name: "create", arguments: card, id: card.id }], opts);
+}
+
+function jsonTurn(turn, opts = {}) {
+  return finalTurn(turn, opts);
 }
 
 function installFetch(responses) {
@@ -74,7 +64,11 @@ function installFetch(responses) {
     const response = responses[Math.min(index, responses.length - 1)];
     index += 1;
 
-    return typeof response === "function" ? response() : response;
+    const result =
+      typeof response === "function"
+        ? response(requests.at(-1)?.body)
+        : response;
+    return result.clone ? result.clone() : result;
   };
 }
 
@@ -98,39 +92,25 @@ afterEach(() => {
 
 describe("respondToAudio streaming", () => {
   test("retries a truncated reply with a larger token budget", async () => {
-    const first = sseResponse([
-      contentEvent('{"transcript":"hi","speak":"Hel'),
-      finishEvent("length"),
-    ]);
+    const first = nativeToolResponse([{ name: "speak", arguments: { text: "Hel" } }], { finishReason: "length" });
     const second = finalTurn({
       transcript: "hi",
       speak: "Hello.",
-      conversation: "Hello.",
     });
 
-    installFetch([first, second]);
+    installFetch([() => first.clone(), () => second.clone()]);
 
     const turn = await respondToAudio(Buffer.from([1]), "audio/wav");
 
     expect(turn.speak).toBe("Hello.");
     expect(requests).toHaveLength(2);
     expect(requests[0].body.max_tokens).toBe(1_200);
-    expect(requests[1].body.max_tokens).toBe(2_000);
+    expect(requests[1].body.max_tokens).toBe(1_200);
     expect(requests[1].body.messages.at(-1).content).toContain("cut off");
   });
 
-
   test("maps an in-stream ResourceExhausted error to busy", async () => {
-    installFetch([
-      sseResponse([
-        {
-          error: {
-            message:
-              "ResourceExhausted: Worker local total request limit reached (529/16)",
-          },
-        },
-      ]),
-    ]);
+    installFetch([new Response("busy", { status: 429 })]);
 
     const error = await respondToAudio(
       Buffer.from([1]),
@@ -141,54 +121,41 @@ describe("respondToAudio streaming", () => {
   });
 
   test("runs a JSON tool round and asks for the normal object", async () => {
-    const tool = sseResponse([
-      contentEvent(
-        JSON.stringify({
-          tool: "get_current_time",
-          timezone: "UTC",
-          transcript: "what time is it?",
-        }),
-      ),
-      finishEvent("stop"),
+    const tool = nativeToolResponse([
+      { name: "get_current_time", arguments: { timezone: "UTC", transcript: "what time is it?" } },
     ]);
     const final = finalTurn({
       transcript: "",
       speak: "It is currently UTC.",
-      conversation: "It is currently UTC.",
+      evidence: ["exec_1"],
     });
 
-    installFetch([tool, final]);
+    installFetch([() => tool.clone(), () => final.clone()]);
 
     const tools = [];
     const turn = await respondToAudio(Buffer.from([1]), "audio/wav", [], {
       onTool: (name) => tools.push(name),
     });
 
-    expect(tools).toEqual(["get_current_time"]);
+    expect(tools).toEqual(["get_current_time", "speak"]);
     expect(turn.transcript).toBe("what time is it?");
     expect(turn.speak).toBe("It is currently UTC.");
     expect(requests).toHaveLength(2);
-    expect(requests[1].body.messages.at(-1).content).toContain(
-      "Current time in UTC",
-    );
+    const toolContents = requests[1].body.messages
+      .filter((m) => m.role === "tool")
+      .map((m) => String(m.content))
+      .join("\n");
+    expect(toolContents).toContain("Current time in UTC");
   });
 
   test("does not stream speak from a tool request", async () => {
-    const tool = sseResponse([
-      contentEvent(
-        '{"tool":"get_current_time","arguments":{"timezone":"UTC"},',
-      ),
-      contentEvent('"speak":"Let me check the time."}'),
-      finishEvent("stop"),
+    const tool = nativeToolResponse([
+      { name: "get_current_time", arguments: { timezone: "UTC" } },
     ]);
 
     installFetch([
-      tool,
-      finalTurn({
-        transcript: "",
-        speak: "It is UTC.",
-        conversation: "It is UTC.",
-      }),
+      () => tool.clone(),
+      () => finalTurn({ transcript: "", speak: "It is UTC.", evidence: ["exec_1"] }).clone(),
     ]);
 
     const spoken = [];
@@ -202,15 +169,8 @@ describe("respondToAudio streaming", () => {
   test("attaches Exa titles to the sources cited in a reply", async () => {
     process.env.EXA_API_KEY = "test-key";
 
-    const tool = sseResponse([
-      contentEvent(
-        JSON.stringify({
-          tool: "websearch",
-          query: "most wanted fugitives",
-          transcript: "who is on the list?",
-        }),
-      ),
-      finishEvent("stop"),
+    const tool = nativeToolResponse([
+      { name: "websearch", arguments: { query: "most wanted fugitives", transcript: "who is on the list?" } },
     ]);
     const search = new Response(
       JSON.stringify({
@@ -223,14 +183,19 @@ describe("respondToAudio streaming", () => {
       }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     );
+    const card = cardTurn({
+      id: "sources",
+      title: "The list",
+      content:
+        "The list is at [FBI](https://www2.fbi.gov/wanted/topten/fugitives/fugitives.htm).",
+    });
     const final = finalTurn({
       transcript: "",
       speak: "The FBI list is the place to check.",
-      conversation:
-        "The list is at [FBI](https://www2.fbi.gov/wanted/topten/fugitives/fugitives.htm).",
+      evidence: ["exec_2"],
     });
 
-    installFetch([tool, search, final]);
+    installFetch([() => tool.clone(), () => search.clone(), () => card.clone(), () => final.clone()]);
 
     const turn = await respondToAudio(Buffer.from([1]), "audio/wav");
 
@@ -240,30 +205,19 @@ describe("respondToAudio streaming", () => {
         title: "Ten Most Wanted Fugitives | FBI",
       },
     ]);
-    expect(requests).toHaveLength(3);
+    expect(turn.cards).toHaveLength(1);
+    expect(requests).toHaveLength(4);
   });
 
   test("stops after three tool rounds and forces a final answer", async () => {
     const tool = () =>
-      sseResponse([
-        contentEvent(
-          JSON.stringify({
-            tool: "get_current_time",
-            timezone: "UTC",
-          }),
-        ),
-        finishEvent("stop"),
-      ]);
+      nativeToolResponse([{ name: "get_current_time", arguments: { timezone: "UTC" } }]);
 
     installFetch([
       tool,
       tool,
       tool,
-      finalTurn({
-        transcript: "",
-        speak: "The time is UTC.",
-        conversation: "The time is UTC.",
-      }),
+      () => finalTurn({ transcript: "", speak: "The time is UTC.", evidence: ["exec_1"] }).clone(),
     ]);
 
     const turn = await respondToAudio(Buffer.from([1]), "audio/wav");
@@ -271,8 +225,57 @@ describe("respondToAudio streaming", () => {
     expect(turn.meta.toolRounds).toBe(3);
     expect(requests).toHaveLength(4);
     expect(requests[3].body.messages.at(-1).content).toContain(
-      "No more tool calls are allowed",
+      "No more search, fetch, create, or time tool calls are allowed",
     );
+    expect(requests[3].body.tools.map((tool) => tool.function.name)).toEqual(["speak"]);
+    expect(requests[3].body.tool_choice).toEqual({
+      type: "function",
+      function: { name: "speak" },
+    });
+  });
+
+  test("a forced answer after create can call speak with evidence", async () => {
+    const plain = () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: { content: "A card is a panel for things you read." },
+              finish_reason: "stop",
+            },
+          ],
+          model: "meta-models/muse-spark-open-1026",
+          usage: {},
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+
+    installFetch([
+      cardTurn({ id: "cards", title: "What cards are", content: "Cards are panels." }),
+      plain,
+      plain,
+      (body) => {
+        const tools = Array.isArray(body.tools) ? body.tools : [];
+        const forcesSpeak =
+          tools.length === 1 &&
+          tools[0].function.name === "speak" &&
+          body.tool_choice?.function?.name === "speak";
+
+        return forcesSpeak
+          ? finalTurn({
+              transcript: "",
+              speak: "The card explains what cards are.",
+              evidence: ["exec_1"],
+            })
+          : plain();
+      },
+    ]);
+
+    const turn = await respondToText("what are cards?");
+
+    expect(turn.speak).toBe("The card explains what cards are.");
+    expect(turn.cards).toHaveLength(1);
+    expect(requests).toHaveLength(4);
   });
 });
 
@@ -281,20 +284,20 @@ describe("tool rounds", () => {
     process.env.EXA_API_KEY = "test-key";
 
     const modelResponses = [
-      sseResponse([
-        contentEvent(
-          JSON.stringify([
-            { tool: "websearch", query: "one" },
-            { tool: "websearch", query: "two" },
-          ]),
-        ),
-        finishEvent("stop"),
+      nativeToolResponse([
+        { name: "websearch", arguments: { query: "one" } },
+        { name: "websearch", arguments: { query: "two" } },
       ]),
+      cardTurn({
+        id: "sources",
+        title: "Both",
+        content:
+          "See [One](https://one.test/a) and [Two](https://two.test/b).",
+      }),
       finalTurn({
         transcript: "",
         speak: "Both.",
-        conversation:
-          "See [One](https://one.test/a) and [Two](https://two.test/b).",
+        evidence: ["exec_3"],
       }),
     ];
     let modelIndex = 0;
@@ -328,7 +331,7 @@ describe("tool rounds", () => {
       const response = modelResponses[modelIndex];
       modelIndex += 1;
 
-      return response;
+      return response.clone();
     };
 
     const turn = await respondToAudio(Buffer.from([1]), "audio/wav");
@@ -338,33 +341,48 @@ describe("tool rounds", () => {
       { url: "https://one.test/a", title: "Title one" },
       { url: "https://two.test/b", title: "Title two" },
     ]);
-    expect(requests).toHaveLength(4);
+    expect(requests).toHaveLength(5);
+  });
+
+  test("collects create cards and keeps their ids unique", async () => {
+    installFetch([
+      () => cardTurn({ title: "First", content: "One" }).clone(),
+      () => cardTurn({ id: "step-2", title: "Second", content: "Two" }).clone(),
+      () => cardTurn({ id: "step-2", title: "Third", content: "Three" }).clone(),
+      () => finalTurn({ transcript: "", speak: "Three cards.", evidence: ["exec_1", "exec_2", "exec_3"] }).clone(),
+    ]);
+
+    const turn = await respondToAudio(Buffer.from([1]), "audio/wav");
+
+    expect(turn.cards).toEqual([
+      { id: "card-1", title: "First", content: "One" },
+      { id: "step-2", title: "Second", content: "Two" },
+      { id: "card-3", title: "Third", content: "Three" },
+    ]);
   });
 
   test("keeps a source without a title when Exa has none", async () => {
     process.env.EXA_API_KEY = "test-key";
 
-    const tool = sseResponse([
-      contentEvent(
-        JSON.stringify({
-          tool: "websearch",
-          query: "untitled",
-          transcript: "look it up",
-        }),
-      ),
-      finishEvent("stop"),
+    const tool = nativeToolResponse([
+      { name: "websearch", arguments: { query: "untitled", transcript: "look it up" } },
     ]);
     const search = new Response(
       JSON.stringify({ results: [{ url: "https://notitle.test/page" }] }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     );
+    const card = cardTurn({
+      id: "sources",
+      title: "Page",
+      content: "Read [this](https://notitle.test/page).",
+    });
     const final = finalTurn({
       transcript: "",
       speak: "Done.",
-      conversation: "Read [this](https://notitle.test/page).",
+      evidence: ["exec_2"],
     });
 
-    installFetch([tool, search, final]);
+    installFetch([() => tool.clone(), () => search.clone(), () => card.clone(), () => final.clone()]);
 
     const turn = await respondToAudio(Buffer.from([1]), "audio/wav");
 
@@ -376,15 +394,8 @@ describe("tool orchestration", () => {
   test("repairs the final answer with the search results still in context", async () => {
     process.env.EXA_API_KEY = "test-key";
 
-    const tool = sseResponse([
-      contentEvent(
-        JSON.stringify({
-          tool: "websearch",
-          arguments: { query: "latest bun" },
-          transcript: "what is the latest bun version",
-        }),
-      ),
-      finishEvent("stop"),
+    const tool = nativeToolResponse([
+      { name: "websearch", arguments: { query: "latest bun", transcript: "what is the latest bun version" } },
     ]);
     const search = new Response(
       JSON.stringify({
@@ -392,21 +403,18 @@ describe("tool orchestration", () => {
       }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     );
-    const broken = sseResponse([
-      contentEvent('{"transcript":"what is the latest bun version","speak":'),
-      finishEvent("stop"),
-    ]);
+    const broken = nativeToolResponse([], { finishReason: "length" });
 
     installFetch([
-      tool,
-      search,
-      broken,
-      jsonTurn({
-        transcript: "",
-        speak: "The latest Bun is 1.4.4.",
-        conversation:
-          "The latest Bun is 1.4.4, per [Bun releases](https://bun.sh/blog).",
-      }),
+      () => tool.clone(),
+      () => search.clone(),
+      () => cardTurn({
+        id: "sources",
+        title: "Bun",
+        content: "The latest Bun is 1.4.4, per [Bun releases](https://bun.sh/blog).",
+      }).clone(),
+      () => broken.clone(),
+      () => jsonTurn({ transcript: "", speak: "The latest Bun is 1.4.4.", evidence: ["exec_2"] }).clone(),
     ]);
 
     const turn = await respondToAudio(Buffer.from([1]), "audio/wav");
@@ -426,18 +434,11 @@ describe("tool orchestration", () => {
   });
 
   test("corrects a bad tool request instead of answering without the tool", async () => {
-    const bad = sseResponse([
-      contentEvent(JSON.stringify({ tool: "web_search", query: "bun" })),
-      finishEvent("stop"),
-    ]);
+    const bad = nativeToolResponse([{ name: "web_search", arguments: { query: "bun" } }]);
 
     installFetch([
-      bad,
-      finalTurn({
-        transcript: "",
-        speak: "I can answer without searching.",
-        conversation: "I can answer without searching.",
-      }),
+      () => bad.clone(),
+      () => finalTurn({ transcript: "", speak: "I can answer without searching." }).clone(),
     ]);
 
     const tools = [];
@@ -446,25 +447,20 @@ describe("tool orchestration", () => {
     });
 
     expect(turn.speak).toBe("I can answer without searching.");
-    expect(tools).toEqual([]);
+    expect(tools).toEqual(["speak"]);
 
-    const correction = requests[1].body.messages.at(-1).content;
+    const toolMessages = requests[1].body.messages
+      .filter((m) => m.role === "tool")
+      .map((m) => String(m.content))
+      .join("\n");
 
-    expect(correction).toContain("not a usable tool request");
-    expect(correction).toContain('"arguments":{"query":"..."}');
+    expect(toolMessages).toContain("Unknown tool");
+    expect(toolMessages).toContain("web_search");
   });
 
   test("stops instead of looping when the forced answer is still a tool request", async () => {
     const tool = () =>
-      sseResponse([
-        contentEvent(
-          JSON.stringify({
-            tool: "get_current_time",
-            arguments: { timezone: "UTC" },
-          }),
-        ),
-        finishEvent("stop"),
-      ]);
+      nativeToolResponse([{ name: "get_current_time", arguments: { timezone: "UTC" } }]);
 
     installFetch([tool, tool, tool, tool, tool, tool]);
 
@@ -508,7 +504,7 @@ describe("tool orchestration", () => {
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       ),
-      jsonTurn({ transcript: "", speak: "Done.", conversation: "Done." }),
+      jsonTurn({ transcript: "", speak: "Done.", evidence: ["exec_1"] }),
     ]);
 
     const turn = await respondToAudio(Buffer.from([1]), "audio/wav");
@@ -527,19 +523,14 @@ describe("tool orchestration", () => {
   test("runs an identical search once per round", async () => {
     process.env.EXA_API_KEY = "test-key";
 
-    const tool = sseResponse([
-      contentEvent(
-        JSON.stringify([
-          { tool: "websearch", arguments: { query: "same" } },
-          { tool: "websearch", arguments: { query: "same" } },
-        ]),
-      ),
-      finishEvent("stop"),
+    const tool = nativeToolResponse([
+      { name: "websearch", arguments: { query: "same" } },
+      { name: "websearch", arguments: { query: "same" } },
     ]);
     const final = finalTurn({
       transcript: "",
       speak: "Done.",
-      conversation: "Done.",
+      evidence: ["exec_1"],
     });
     let searches = 0;
 
@@ -559,7 +550,7 @@ describe("tool orchestration", () => {
         });
       }
 
-      return searches === 0 ? tool : final;
+      return searches === 0 ? tool.clone() : final.clone();
     };
 
     const turn = await respondToAudio(Buffer.from([1]), "audio/wav");
@@ -569,27 +560,19 @@ describe("tool orchestration", () => {
   });
 
   test("gives the whole turn one deadline", async () => {
-    const tool = sseResponse([
-      contentEvent(
-        JSON.stringify({
-          tool: "get_current_time",
-          arguments: { timezone: "UTC" },
-        }),
-      ),
-      finishEvent("stop"),
+    const tool = nativeToolResponse([
+      { name: "get_current_time", arguments: { timezone: "UTC" } },
     ]);
 
     installFetch([
-      tool,
-      finalTurn({ transcript: "", speak: "Hi.", conversation: "Hi." }),
+      () => tool.clone(),
+      () => finalTurn({ transcript: "", speak: "Hi.", evidence: ["exec_1"] }).clone(),
     ]);
 
     await respondToAudio(Buffer.from([1]), "audio/wav");
 
     expect(requests[0].body.max_tokens).toBe(1_200);
     expect(requests[0].signal).toBeInstanceOf(AbortSignal);
-    // Each request composes the turn budget with its own timeout via
-    // `AbortSignal.any`, so the instances differ but both are bounded.
     expect(requests[1].signal).toBeInstanceOf(AbortSignal);
   });
 
@@ -628,7 +611,6 @@ describe("tool orchestration", () => {
     );
 
     expect(error.code).toBe("no_reply");
-    // 3 tool rounds + 1 forced call; no repair request after the forced call.
     expect(requests).toHaveLength(4);
   });
 
@@ -668,7 +650,7 @@ describe("tool orchestration", () => {
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       ),
-      jsonTurn({ transcript: "", speak: "Done.", conversation: "Done." }),
+      jsonTurn({ transcript: "", speak: "Done.", evidence: ["exec_1", "exec_2"] }),
     ]);
 
     const turn = await respondToAudio(Buffer.from([1]), "audio/wav");
@@ -679,12 +661,10 @@ describe("tool orchestration", () => {
       (message) => message.role === "tool",
     );
 
-    // Echoed tool_calls match the parsed calls (3 raw → 2 parsed), not the raw array.
     expect(assistantMessage.tool_calls.map((call) => call.id)).toEqual([
       "call_a",
       "call_c",
     ]);
-    // One tool message per echoed call, ids aligned.
     expect(toolMessages.map((message) => message.tool_call_id)).toEqual([
       "call_a",
       "call_c",
@@ -719,7 +699,7 @@ describe("tool orchestration", () => {
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       ),
-      jsonTurn({ transcript: "", speak: "Done.", conversation: "Done." }),
+      jsonTurn({ transcript: "", speak: "Done.", evidence: ["exec_1"] }),
     ]);
 
     await respondToAudio(Buffer.from([1]), "audio/wav");
@@ -735,15 +715,8 @@ describe("web fetch", () => {
   test("fetches a page found by a search in the next round", async () => {
     process.env.EXA_API_KEY = "test-key";
 
-    const searchRequest = sseResponse([
-      contentEvent(
-        JSON.stringify({
-          tool: "websearch",
-          arguments: { query: "bun install docs" },
-          transcript: "read the install docs",
-        }),
-      ),
-      finishEvent("stop"),
+    const searchRequest = nativeToolResponse([
+      { name: "websearch", arguments: { query: "bun install docs", transcript: "read the install docs" } },
     ]);
     const search = new Response(
       JSON.stringify({
@@ -753,31 +726,33 @@ describe("web fetch", () => {
       }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     );
-    const fetchRequest = sseResponse([
-      contentEvent(
-        JSON.stringify({
-          tool: "webfetch",
-          arguments: {
-            url: "https://bun.sh/docs/install",
-            focus: "windows",
-          },
+    const fetchRequest = nativeToolResponse([
+      {
+        name: "webfetch",
+        arguments: {
+          url: "https://bun.sh/docs/install",
+          focus: "windows",
           transcript: "read the install docs",
-        }),
-      ),
-      finishEvent("stop"),
+        },
+      },
     ]);
     const page = new Response(
       "<html><head><title>Install Bun</title></head><body><p>On Windows, run winget install.</p></body></html>",
       { status: 200, headers: { "Content-Type": "text/html" } },
     );
+    const card = cardTurn({
+      id: "sources",
+      title: "Windows install",
+      content:
+        "On Windows, run winget, per the [Bun install docs](https://bun.sh/docs/install).",
+    });
     const final = finalTurn({
       transcript: "",
       speak: "Use winget on Windows.",
-      conversation:
-        "On Windows, run winget, per the [Bun install docs](https://bun.sh/docs/install).",
+      evidence: ["exec_2", "exec_3"],
     });
 
-    installFetch([searchRequest, search, fetchRequest, page, final]);
+    installFetch([() => searchRequest.clone(), () => search.clone(), () => fetchRequest.clone(), () => page.clone(), () => card.clone(), () => final.clone()]);
 
     const tools = [];
     const turn = await respondToAudio(Buffer.from([1]), "audio/wav", [], {
@@ -787,6 +762,7 @@ describe("web fetch", () => {
     expect(tools).toEqual([
       { name: "websearch", detail: "bun install docs" },
       { name: "webfetch", detail: "https://bun.sh/docs/install" },
+      { name: "create", detail: undefined },
     ]);
 
     expect(turn.speak).toBe("Use winget on Windows.");
@@ -794,30 +770,19 @@ describe("web fetch", () => {
       { url: "https://bun.sh/docs/install", title: "Install Bun" },
     ]);
 
-    // The fetch round sees the search result that produced its URL.
-    expect(requests[2].body.messages.at(-1).content).toContain(
-      "https://bun.sh/docs",
-    );
-    // The answer round sees the fenced page text.
-    expect(requests[4].body.messages.at(-1).content).toContain(
-      "winget install",
-    );
-    expect(requests[4].body.messages.at(-1).content).toContain(
-      "UNTRUSTED_WEB_PAGE",
-    );
+    const fetchRoundMessages = requests[2].body.messages.map((m) => String(m.content)).join("\n");
+    expect(fetchRoundMessages).toContain("https://bun.sh/docs");
+    const createRoundMessages = requests[4].body.messages.map((m) => String(m.content)).join("\n");
+    expect(createRoundMessages).toContain("winget install");
+    expect(createRoundMessages).toContain("UNTRUSTED_WEB_PAGE");
   });
 
   test("keeps a failed fetch and a successful search in one round", async () => {
     process.env.EXA_API_KEY = "test-key";
 
-    const requestsTurn = sseResponse([
-      contentEvent(
-        JSON.stringify([
-          { tool: "websearch", arguments: { query: "atlas docs" } },
-          { tool: "webfetch", arguments: { url: "https://example.com/gone" } },
-        ]),
-      ),
-      finishEvent("stop"),
+    const requestsTurn = nativeToolResponse([
+      { name: "websearch", arguments: { query: "atlas docs" } },
+      { name: "webfetch", arguments: { url: "https://example.com/gone" } },
     ]);
     const search = new Response(
       JSON.stringify({
@@ -826,21 +791,28 @@ describe("web fetch", () => {
       { status: 200, headers: { "Content-Type": "application/json" } },
     );
     const missing = new Response("missing", { status: 404 });
+    const card = cardTurn({
+      id: "sources",
+      title: "Search result",
+      content: "See [Atlas](https://example.com/atlas).",
+    });
     const final = finalTurn({
       transcript: "",
       speak: "The search worked, but the page did not load.",
-      conversation:
-        "The search worked, but the page did not load. See [Atlas](https://example.com/atlas).",
+      evidence: ["exec_1", "exec_2"],
     });
 
-    installFetch([requestsTurn, search, missing, final]);
+    installFetch([() => requestsTurn.clone(), () => search.clone(), () => missing.clone(), () => card.clone(), () => final.clone()]);
 
     const realError = console.error;
     console.error = () => {};
 
     try {
       const turn = await respondToAudio(Buffer.from([1]), "audio/wav");
-      const results = requests[3].body.messages.at(-1).content;
+      const results = requests[3].body.messages
+        .filter((m) => m.role === "tool")
+        .map((m) => String(m.content))
+        .join("\n");
 
       expect(turn.speak).toContain("did not load");
       expect(results).toContain("Web fetch failed");
@@ -854,50 +826,38 @@ describe("web fetch", () => {
   });
 
   test("reports a rejected sibling call to the model", async () => {
-    const mixed = sseResponse([
-      contentEvent(
-        JSON.stringify([
-          { tool: "get_current_time", arguments: { timezone: "UTC" } },
-          { tool: "websearch", transcript: "missing query" },
-        ]),
-      ),
-      finishEvent("stop"),
+    const mixed = nativeToolResponse([
+      { name: "get_current_time", arguments: { timezone: "UTC" } },
+      { name: "websearch", arguments: {} },
     ]);
     const final = finalTurn({
       transcript: "",
       speak: "It is UTC.",
-      conversation: "It is UTC.",
+      evidence: ["exec_1"],
     });
 
-    installFetch([mixed, final]);
+    installFetch([() => mixed.clone(), () => final.clone()]);
 
     const turn = await respondToAudio(Buffer.from([1]), "audio/wav");
-    const results = requests[1].body.messages.at(-1).content;
+    const results = requests[1].body.messages
+      .filter((m) => m.role === "tool")
+      .map((m) => String(m.content))
+      .join("\n");
 
     expect(turn.speak).toBe("It is UTC.");
     expect(results).toContain("Current time in UTC");
-    expect(results).toContain("Rejected tool calls");
-    expect(results).toContain("missing required argument");
+    expect(results).toContain("Unknown tool");
   });
 
   test("runs the same tool once across rounds", async () => {
     process.env.EXA_API_KEY = "test-key";
 
     const tool = () =>
-      sseResponse([
-        contentEvent(
-          JSON.stringify({
-            tool: "websearch",
-            arguments: { query: "same query" },
-            transcript: "look it up",
-          }),
-        ),
-        finishEvent("stop"),
-      ]);
+      nativeToolResponse([{ name: "websearch", arguments: { query: "same query", transcript: "look it up" } }]);
     const final = finalTurn({
       transcript: "",
       speak: "Done.",
-      conversation: "Done.",
+      evidence: ["exec_1"],
     });
     let modelCalls = 0;
     let searches = 0;
@@ -920,7 +880,8 @@ describe("web fetch", () => {
 
       modelCalls += 1;
 
-      return modelCalls === 3 ? final : tool();
+      const resp = modelCalls === 3 ? final.clone() : tool().clone();
+      return resp;
     };
 
     const turn = await respondToAudio(Buffer.from([1]), "audio/wav");
@@ -934,15 +895,8 @@ describe("web fetch", () => {
     process.env.EXA_API_KEY = "test-key";
 
     const controller = new AbortController();
-    const tool = sseResponse([
-      contentEvent(
-        JSON.stringify({
-          tool: "websearch",
-          arguments: { query: "any query" },
-          transcript: "look it up",
-        }),
-      ),
-      finishEvent("stop"),
+    const tool = nativeToolResponse([
+      { name: "websearch", arguments: { query: "any query", transcript: "look it up" } },
     ]);
     let toolSignal;
     let modelCalls = 0;
@@ -960,7 +914,7 @@ describe("web fetch", () => {
 
       modelCalls += 1;
 
-      return tool;
+      return tool.clone();
     };
 
     const error = await respondToAudio(
@@ -981,19 +935,19 @@ describe("web fetch", () => {
 describe("Muse Spark Open request shape", () => {
   test("uses the cheapest reasoning depth and asks for a usage frame", async () => {
     installFetch([
-      finalTurn({ transcript: "hi", speak: "Hi.", conversation: "Hi." }),
+      finalTurn({ transcript: "hi", speak: "Hi." }),
     ]);
 
     await respondToAudio(Buffer.from([1]), "audio/wav");
 
     expect(requests[0].body.reasoning_effort).toBe("low");
-    expect(requests[0].body.stream_options).toEqual({ include_usage: true });
-    expect(requests[0].body.stream).toBe(true);
+    expect(requests[0].body.stream).toBeUndefined();
+    expect(requests[0].body.tools).toBeDefined();
   });
 
-  test("sends the conversation affinity key as a header", async () => {
+  test("sends the session affinity key as a header", async () => {
     installFetch([
-      finalTurn({ transcript: "hi", speak: "Hi.", conversation: "Hi." }),
+      finalTurn({ transcript: "hi", speak: "Hi." }),
     ]);
 
     await respondToText("hi", [], {}, { session: "  session-abc  " });
@@ -1003,7 +957,7 @@ describe("Muse Spark Open request shape", () => {
 
   test("omits the affinity header when the client sends no session", async () => {
     installFetch([
-      finalTurn({ transcript: "hi", speak: "Hi.", conversation: "Hi." }),
+      finalTurn({ transcript: "hi", speak: "Hi." }),
     ]);
 
     await respondToText("hi");
@@ -1021,7 +975,7 @@ describe("Muse Spark Open request shape", () => {
 
   test("sends a sanitized affinity key instead of failing the request", async () => {
     installFetch([
-      finalTurn({ transcript: "hi", speak: "Hi.", conversation: "Hi." }),
+      finalTurn({ transcript: "hi", speak: "Hi." }),
     ]);
 
     await respondToText("hi", [], {}, { session: "abc\r\nDEF" });
@@ -1031,25 +985,14 @@ describe("Muse Spark Open request shape", () => {
 
   test("reports cached, audio, and reasoning tokens from the usage frame", async () => {
     installFetch([
-      sseResponse([
-        contentEvent(
-          JSON.stringify({
-            transcript: "hi",
-            speak: "Hi.",
-            conversation: "Hi.",
-          }),
-        ),
-        {
-          choices: [],
-          usage: {
-            prompt_tokens: 1_000,
-            completion_tokens: 50,
-            prompt_tokens_details: { cached_tokens: 900, audio_tokens: 120 },
-            completion_tokens_details: { reasoning_tokens: 30 },
-          },
+      nativeToolResponse([{ name: "speak", arguments: { text: "Hi." } }], {
+        usage: {
+          prompt_tokens: 1_000,
+          completion_tokens: 50,
+          prompt_tokens_details: { cached_tokens: 900, audio_tokens: 120 },
+          completion_tokens_details: { reasoning_tokens: 30 },
         },
-        finishEvent("stop"),
-      ]),
+      }),
     ]);
 
     const turn = await respondToText("hi");
@@ -1062,17 +1005,7 @@ describe("Muse Spark Open request shape", () => {
 
   test("defaults every usage field to zero when the frame is empty", async () => {
     installFetch([
-      sseResponse([
-        contentEvent(
-          JSON.stringify({
-            transcript: "hi",
-            speak: "Hi.",
-            conversation: "Hi.",
-          }),
-        ),
-        { choices: [], usage: {} },
-        finishEvent("stop"),
-      ]),
+      nativeToolResponse([{ name: "speak", arguments: { text: "Hi." } }], { usage: {} }),
     ]);
 
     const turn = await respondToText("hi");
@@ -1086,31 +1019,19 @@ describe("Muse Spark Open request shape", () => {
 
   test("keeps earlier usage counts when a later frame is partial", async () => {
     installFetch([
-      sseResponse([
-        contentEvent(
-          JSON.stringify({
-            transcript: "hi",
-            speak: "Hi.",
-            conversation: "Hi.",
-          }),
-        ),
-        {
-          choices: [],
-          usage: {
-            prompt_tokens: 1_000,
-            prompt_tokens_details: { cached_tokens: 900 },
-          },
+      nativeToolResponse([{ name: "speak", arguments: { text: "Hi." } }], {
+        usage: {
+          prompt_tokens: 1_000,
+          prompt_tokens_details: { cached_tokens: 900 },
         },
-        { choices: [], usage: { completion_tokens: 50 } },
-        finishEvent("stop"),
-      ]),
+      }),
     ]);
 
     const turn = await respondToText("hi");
 
     expect(turn.meta.promptTokens).toBe(1_000);
     expect(turn.meta.cachedTokens).toBe(900);
-    expect(turn.meta.completionTokens).toBe(50);
+    expect(turn.meta.completionTokens).toBe(0);
   });
 
   test("maps 529 capacity shedding to a retryable busy error", async () => {
@@ -1166,5 +1087,179 @@ describe("external cancellation", () => {
 
     expect(error.code).toBe("timeout");
     expect(requests).toHaveLength(0);
+  });
+});
+
+describe("speak as iterative tool (native-only)", () => {
+  function nativeSpeakResponse(texts) {
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: texts.map((text, i) => ({
+                id: `call_speak_${i}`,
+                type: "function",
+                function: { name: "speak", arguments: JSON.stringify({ text }) },
+              })),
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  test("single speak tool call produces speak", async () => {
+    installFetch([nativeSpeakResponse(["hi there"])]);
+
+    const turn = await respondToText("hello");
+
+    expect(turn.speak).toBe("hi there");
+    expect(turn.transcript).toBe("hello");
+  });
+
+  test("two speak calls in one round concatenate", async () => {
+    installFetch([nativeSpeakResponse(["Hello.", "How can I help?"])]);
+
+    const turn = await respondToText("hi");
+
+    expect(turn.speak).toBe("Hello. How can I help?");
+  });
+
+  test("speak + create in one round repairs and cites the card on the next round", async () => {
+    // Same-round speak cannot cite the sibling create (the execution has not
+    // been delivered yet), so the utterance is withheld and repaired once.
+    const mixed = new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_1",
+                  type: "function",
+                  function: {
+                    name: "create",
+                    arguments: JSON.stringify({ title: "Card One", content: "Content one" }),
+                  },
+                },
+                {
+                  id: "call_2",
+                  type: "function",
+                  function: { name: "speak", arguments: JSON.stringify({ text: "Here is your card." }) },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+    const approved = nativeToolResponse([
+      {
+        name: "speak",
+        arguments: { text: "Here is your card.", evidence: ["exec_1"] },
+      },
+    ]);
+
+    installFetch([() => mixed.clone(), () => approved.clone()]);
+
+    const turn = await respondToText("show me something");
+
+    expect(turn.speak).toBe("Here is your card.");
+    expect(turn.cards).toHaveLength(1);
+    expect(turn.cards[0].title).toBe("Card One");
+
+    const firstRoundTools = requests[1].body.messages
+      .filter((m) => m.role === "tool")
+      .map((m) => String(m.content))
+      .join("\n");
+
+    expect(firstRoundTools).toContain("was withheld");
+    expect(firstRoundTools).toContain("exec_1 succeeded");
+  });
+
+  test("model.ts no longer imports json text fallback", async () => {
+    const source = await (await import("fs/promises")).readFile("src/lib/model.ts", "utf8");
+    expect(source).not.toContain("extractJsonValue");
+    expect(source).not.toContain("json-extract");
+  });
+});
+
+describe("turn debug capture", () => {
+  test("is omitted unless the caller asks for it", async () => {
+    installFetch([finalTurn({ transcript: "hi", speak: "Hello." })]);
+
+    const turn = await respondToText("hi");
+
+    expect(turn.debug).toBeUndefined();
+  });
+
+  test("keeps the provider payload for every model call", async () => {
+    const tool = nativeToolResponse([
+      {
+        name: "get_current_time",
+        arguments: { timezone: "UTC", transcript: "what time is it?" },
+      },
+    ]);
+    const final = finalTurn({
+      transcript: "",
+      speak: "It is currently UTC.",
+      evidence: ["exec_1"],
+    });
+
+    installFetch([() => tool.clone(), () => final.clone()]);
+
+    const turn = await respondToText("what time is it?", [], {}, { debug: true });
+
+    expect(turn.debug.rounds).toHaveLength(2);
+    expect(turn.debug.rounds.map((round) => round.round)).toEqual([1, 2]);
+    expect(turn.debug.rounds.map((round) => round.tools)).toEqual([true, true]);
+    expect(turn.debug.rounds[0].response.choices[0].message.tool_calls[0].function.name).toBe(
+      "get_current_time",
+    );
+    expect(turn.debug.rounds[1].response.choices[0].message.tool_calls[0].function.name).toBe(
+      "speak",
+    );
+    expect(turn.debug.rounds[1].response.choices[0].finish_reason).toBe("tool_calls");
+    expect(turn.debug.rounds[1].atMs).toBeGreaterThanOrEqual(turn.debug.rounds[0].atMs);
+  });
+
+  test("captures a length retry as a second, forced-speak round", async () => {
+    const first = nativeToolResponse(
+      [{ name: "speak", arguments: { text: "Hel" } }],
+      { finishReason: "length" },
+    );
+    const second = finalTurn({ transcript: "hi", speak: "Hello." });
+
+    installFetch([() => first.clone(), () => second.clone()]);
+
+    const turn = await respondToText("hi", [], {}, { debug: true });
+
+    expect(turn.speak).toBe("Hello.");
+    expect(turn.debug.rounds).toHaveLength(2);
+    expect(turn.debug.rounds.map((round) => round.tools)).toEqual([true, true]);
+    expect(turn.debug.rounds[0].response.choices[0].finish_reason).toBe("length");
+    expect(turn.debug.rounds[1].response.choices[0].finish_reason).toBe("tool_calls");
+    expect(requests[1].body.tools.map((tool) => tool.function.name)).toEqual(["speak"]);
+    expect(requests[1].body.tool_choice).toEqual({
+      type: "function",
+      function: { name: "speak" },
+    });
+  });
+
+  test("does not copy request headers or the API key into the payload", async () => {
+    installFetch([finalTurn({ transcript: "hi", speak: "Hello." })]);
+
+    const turn = await respondToText("hi", [], {}, { debug: true });
+    const serialized = JSON.stringify(turn.debug);
+
+    expect(serialized).not.toContain("test-key");
+    expect(serialized).not.toContain("Authorization");
   });
 });

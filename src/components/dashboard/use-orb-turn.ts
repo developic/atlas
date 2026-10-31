@@ -5,6 +5,7 @@ import type { Dispatch, RefObject, SetStateAction } from "react";
 
 import { shouldRevealTurn, type RevealTrigger } from "@/components/dashboard/orb-reveal";
 import { usePcmPlayer } from "@/components/dashboard/use-pcm-player";
+import { joinCardMarkdown } from "@/lib/cards";
 import {
   toModelHistory,
   trimHistory,
@@ -13,9 +14,15 @@ import {
 import { loadOnboarding } from "@/lib/onboarding";
 import { toToolTrace, type ToolTrace } from "@/lib/tool-trace";
 import {
+  MAX_WIRE_FRAMES,
+  type TurnWire,
+  type WireFrame,
+} from "@/lib/turn-debug";
+import {
   fetchTurnStream,
   TurnStreamError,
   type SpeakingEvent,
+  type TurnEvent,
 } from "@/lib/turn-stream";
 import { clipToWav } from "@/lib/wav";
 
@@ -33,6 +40,11 @@ const MAX_BUSY_RETRIES = 2;
 const TURN_TIMEOUT_MS = 100_000;
 /** A turn shows a handful of tool rows, not every repeated round. */
 const MAX_TURN_TOOLS = 6;
+/**
+ * Ask the server for raw provider payloads while developing. The route gates
+ * the same flag, so a production build never attaches them without an env opt-in.
+ */
+const REQUEST_TURN_DEBUG = process.env.NODE_ENV !== "production";
 
 /**
  * One affinity id per browser session. Baseten routes requests that share it
@@ -128,6 +140,17 @@ export function useOrbTurn({
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiAudio, setAiAudio] = useState<string | null>(null);
   const [aiTool, setAiTool] = useState<ToolTrace | null>(null);
+  /**
+   * The last turn's wire tap for the debug panel. It is intentionally separate
+   * from history: it is never persisted, and a new turn replaces it.
+   */
+  const [wire, setWire] = useState<TurnWire | null>(null);
+  const wireAudioRef = useRef({
+    frames: 0,
+    bytes: 0,
+    sampleRate: 0,
+    done: false,
+  });
 
   const {
     prime: primePlayback,
@@ -172,9 +195,12 @@ export function useOrbTurn({
 
   const appendAssistant = useCallback(
     (event: SpeakingEvent) => {
-      const content = (event.conversation || event.speak).trim();
+      const cards = event.cards ?? [];
+      const content = (
+        cards.length > 0 ? joinCardMarkdown(cards) : event.speak
+      ).trim();
 
-      if (!content) return;
+      if (!content && !event.speak) return;
 
       setHistory((previous) =>
         [
@@ -184,6 +210,7 @@ export function useOrbTurn({
             role: "assistant" as const,
             content,
             ...(event.speak ? { speak: event.speak } : {}),
+            ...(cards.length > 0 ? { cards } : {}),
             ...(event.sources?.length
               ? { sources: event.sources.slice(0, 12) }
               : {}),
@@ -253,6 +280,47 @@ export function useOrbTurn({
     setAiState(trace.tool === "websearch" ? "searching" : "thinking");
   }, []);
 
+  /**
+   * Record one wire frame. Audio is deliberately aggregated: a single reply
+   * can contain dozens of PCM frames, and their base64 would swamp the panel.
+   */
+  const recordWireEvent = useCallback((event: TurnEvent) => {
+    if (event.status === "audio") {
+      const audio = wireAudioRef.current;
+
+      audio.frames += 1;
+      audio.bytes += Math.floor((event.pcm.length * 3) / 4);
+      audio.sampleRate = event.sampleRate;
+
+      return;
+    }
+
+    setWire((current) => {
+      if (!current) return current;
+
+      const frame: WireFrame = {
+        atMs: Math.round(performance.now() - current.startedAt),
+        event,
+      };
+      const frames = [...current.frames, frame].slice(-MAX_WIRE_FRAMES);
+      const audio = {
+        ...wireAudioRef.current,
+        done:
+          wireAudioRef.current.done ||
+          event.status === "audio-done" ||
+          event.status === "audio-mp3",
+      };
+
+      return {
+        ...current,
+        elapsedMs: Math.round(performance.now() - current.startedAt),
+        frames,
+        audio,
+        ...(event.status === "speaking" ? { final: event } : {}),
+      };
+    });
+  }, []);
+
   const flushPendingPcm = useCallback(() => {
     const pending = pendingPcmRef.current;
     pendingPcmRef.current = [];
@@ -305,6 +373,9 @@ export function useOrbTurn({
 
   const makeHandlers = useCallback(
     (echoTranscript: boolean) => ({
+      // Debug tap: runs before the reader dispatches, and before an error
+      // frame throws, so the panel sees the full wire.
+      onEvent: (event: TurnEvent) => recordWireEvent(event),
       // Keep the older `searching` frame working too; the route now sends the
       // same tool event with the query attached.
       onSearching: (query?: string) => noteTool("websearch", query),
@@ -351,6 +422,7 @@ export function useOrbTurn({
       markPlaybackDone,
       maybeRevealPcm,
       noteTool,
+      recordWireEvent,
       revealPendingTurn,
       upsertUser,
     ],
@@ -365,6 +437,24 @@ export function useOrbTurn({
       abortRef.current = controller;
 
       resetTurn("thinking");
+
+      wireAudioRef.current = {
+        frames: 0,
+        bytes: 0,
+        sampleRate: 0,
+        done: false,
+      };
+      setWire({
+        id: crypto.randomUUID(),
+        startedAt: performance.now(),
+        elapsedMs: 0,
+        status: "running",
+        frames: [],
+        audio: { ...wireAudioRef.current },
+        final: null,
+        error: null,
+      });
+
       prepare?.();
 
       const handlers = makeHandlers(echoTranscript);
@@ -387,9 +477,17 @@ export function useOrbTurn({
               },
               handlers,
             );
+            setWire((current) =>
+              current ? { ...current, status: "done" } : current,
+            );
             return;
           } catch (error) {
-            if (controller.signal.aborted) return;
+            if (controller.signal.aborted) {
+              setWire((current) =>
+                current ? { ...current, status: "stopped" } : current,
+              );
+              return;
+            }
 
             if (
               error instanceof TurnStreamError &&
@@ -397,7 +495,12 @@ export function useOrbTurn({
               attempt < MAX_BUSY_RETRIES
             ) {
               await wait(BUSY_RETRY_MS);
-              if (controller.signal.aborted) return;
+              if (controller.signal.aborted) {
+                setWire((current) =>
+                  current ? { ...current, status: "stopped" } : current,
+                );
+                return;
+              }
               continue;
             }
 
@@ -405,7 +508,12 @@ export function useOrbTurn({
           }
         }
       } catch (error) {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted) {
+          setWire((current) =>
+            current ? { ...current, status: "stopped" } : current,
+          );
+          return;
+        }
 
         // A failure after `speaking` must not delete text the user already
         // has; show the reply and the error together.
@@ -413,6 +521,20 @@ export function useOrbTurn({
         stopPlayback();
         setAiError(turnErrorMessage(error));
         setAiState("error");
+        setWire((current) =>
+          current
+            ? {
+                ...current,
+                status: "error",
+                error: {
+                  ...(error instanceof TurnStreamError && error.code
+                    ? { code: error.code }
+                    : {}),
+                  message: turnErrorMessage(error),
+                },
+              }
+            : current,
+        );
       } finally {
         if (abortRef.current === controller) {
           abortRef.current = null;
@@ -456,6 +578,7 @@ export function useOrbTurn({
 
           const affinity = sessionId();
           if (affinity) form.append("session", affinity);
+          if (REQUEST_TURN_DEBUG) form.append("debug", "1");
 
           return { body: form };
         },
@@ -503,6 +626,7 @@ export function useOrbTurn({
               voice: saved?.voiceId ?? undefined,
               pace: saved?.pace ?? undefined,
               session: sessionId(),
+              ...(REQUEST_TURN_DEBUG ? { debug: true } : {}),
             }),
           };
         },
@@ -541,6 +665,9 @@ export function useOrbTurn({
     setAiState("error");
   }, []);
 
+  /** Drop the last turn's wire capture without touching the conversation. */
+  const clearWire = useCallback(() => setWire(null), []);
+
   return {
     aiState,
     aiReply,
@@ -556,5 +683,7 @@ export function useOrbTurn({
     onAudioFailed,
     dismissError,
     failTurn,
+    wire,
+    clearWire,
   };
 }

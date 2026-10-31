@@ -4,7 +4,8 @@
  * Follows Exa's recommended /search request: query + auto + highlights only.
  * Never import this module from a client component: it reads EXA_API_KEY.
  */
-import { CITATION_INSTRUCTION, type OrbTool, type ToolResult } from "./types";
+import { OrbError } from "../orb-errors";
+import { CITATION_INSTRUCTION, type OrbTool, type ToolOutcome } from "./types";
 
 const EXA_URL = "https://api.exa.ai/search";
 const EXA_TIMEOUT_MS = 15_000;
@@ -35,7 +36,7 @@ function getApiKey(): string {
   const key = process.env.EXA_API_KEY?.trim();
 
   if (!key) {
-    throw new Error("EXA_API_KEY is not configured. Add it to .env.");
+    throw new OrbError("config", "EXA_API_KEY is not configured. Add it to .env.");
   }
 
   return key;
@@ -48,7 +49,7 @@ export async function websearch(
   const cleaned = query.trim().slice(0, 400);
 
   if (!cleaned) {
-    throw new Error("The assistant asked for an empty web search.");
+    throw new OrbError("validation", "The assistant asked for an empty web search.");
   }
 
   const key = getApiKey();
@@ -76,7 +77,7 @@ export async function websearch(
       error instanceof Error &&
       (error.name === "TimeoutError" || error.name === "AbortError")
     ) {
-      throw new Error("Web search took too long.");
+      throw new OrbError("fetch_failed", "Web search took too long.");
     }
 
     throw error;
@@ -85,7 +86,8 @@ export async function websearch(
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
 
-    throw new Error(
+    throw new OrbError(
+      "fetch_failed",
       `Exa search failed (${response.status}): ${detail.slice(0, 160)}`,
     );
   }
@@ -217,40 +219,31 @@ export function formatSearchResults(
 }
 
 /**
- * Run the web search tool. Never throws: a failure is returned as text the
- * model can read and explain, so one unavailable tool cannot kill the turn.
- * Search hits come back titled so the panel can cite them.
+ * Run the web search tool. A broken query is a validation failure, and a
+ * network-level search failure is reported to the model as text (never thrown),
+ * but both complete the execution as FAILED in the ledger: a failed search is
+ * never success evidence for any claim the model makes later. Search hits
+ * come back titled so the panel can cite them.
  */
 export async function runWebsearch(
   args: Record<string, string>,
   signal?: AbortSignal,
-): Promise<ToolResult> {
+): Promise<ToolOutcome> {
   const query = args.query?.trim();
 
   if (!query) {
-    return {
-      content:
-        "websearch needs a non-empty query. Try again with a search query.",
-      sources: [],
-    };
+    return { ok: false, error: "websearch needs a non-empty query. Try again with a search query." };
   }
 
   try {
     const hits = await websearch(query, signal);
 
-    return {
-      content: formatSearchResults(query, hits),
-      sources: hits.map((hit) => ({
-        url: hit.url,
-        ...(hit.title ? { title: hit.title } : {}),
-      })),
-    };
+    return { ok: true, result: { content: formatSearchResults(query, hits), sources: hits.map((hit) => ({ url: hit.url, ...(hit.title ? { title: hit.title } : {}) })) }};
   } catch (error) {
     console.error("Exa web search failed", error);
 
-    return {
-      content: `Web search failed for ${JSON.stringify(query)}. Answer from what you already know and do not invent sources or claim you searched.`,
-      sources: [],
-    };
+    // ok:false so the ledger records the execution as failed: the model may
+    // say it failed, but can never present this run as successful evidence.
+    return { ok: false, error: `Web search failed for ${JSON.stringify(query)}. Answer from what you already know and do not invent sources or claim you searched.` };
   }
 }
