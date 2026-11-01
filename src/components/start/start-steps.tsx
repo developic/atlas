@@ -264,7 +264,7 @@ export function VoiceStep({
       </fieldset>
 
       <p className="mt-3 font-mono text-xs leading-relaxed text-ink-muted">
-        Previews use Cartesia Sonic. The final Atlas voice may differ.
+        Previews use Deepgram Aura. The final Atlas voice may differ.
       </p>
 
       {!supported ? (

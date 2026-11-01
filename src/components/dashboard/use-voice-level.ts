@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { VoiceFrame } from "@/components/dashboard/voice-activity";
+
 /**
  * Microphone for the dashboard orb: live level and recording.
  *
@@ -71,19 +73,30 @@ function pickMimeType() {
 function sample(
   session: Session,
   level: { current: number },
-  activity: { current: number },
+  activity: { current: VoiceFrame },
 ) {
   const loop = () => {
     session.analyser.getByteTimeDomainData(session.data);
 
     let sum = 0;
+    let crossings = 0;
+    let previous = 0;
+
     for (let index = 0; index < session.data.length; index += 1) {
       const value = (session.data[index] - 128) / 128;
       sum += value * value;
+
+      if (index > 0 && value * previous < 0) crossings += 1;
+      previous = value;
     }
 
     const rms = Math.sqrt(sum / session.data.length);
-    activity.current = rms;
+    // Crossings per second, halved: a rough centre frequency for the VAD's
+    // voice band. The analyser clock is the sample count, not wall time.
+    const seconds = session.data.length / session.context.sampleRate;
+    const zcrHz = seconds > 0 ? crossings / seconds / 2 : 0;
+
+    activity.current = { rms, zcrHz };
 
     const target = Math.min(1, Math.max(0, (rms - FLOOR) / (CEILING - FLOOR))) ** 0.8;
     // Fast attack, slow release: the orb leaps on a syllable and settles after.
@@ -105,7 +118,7 @@ function isDenied(error: unknown) {
 
 export function useVoiceLevel() {
   const levelRef = useRef(0);
-  const activityRef = useRef(0);
+  const activityRef = useRef<VoiceFrame>({ rms: 0, zcrHz: 0 });
   const sessionRef = useRef<Session | null>(null);
   const tokenRef = useRef(0);
   const pendingRef = useRef(0);
@@ -158,7 +171,7 @@ export function useVoiceLevel() {
 
     void session.context.close();
     levelRef.current = 0;
-    activityRef.current = 0;
+    activityRef.current = { rms: 0, zcrHz: 0 };
   }, []);
 
   const clearWatchdog = useCallback(() => {

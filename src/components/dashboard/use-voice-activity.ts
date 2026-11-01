@@ -6,18 +6,20 @@ import {
   advanceVoiceActivity,
   createVoiceActivityState,
   VOICE_ACTIVITY_CONFIG,
+  type VoiceFrame,
 } from "@/components/dashboard/voice-activity";
 
 type VoiceActivityOptions = {
   active: boolean;
-  activityRef: { current: number };
+  activityRef: { current: VoiceFrame };
   onSpeechStart: () => boolean;
   onSpeechEnd: (voicedMs: number) => void;
   armDelayMs?: number;
 };
 
 /**
- * Turns the mic's raw RMS into start/end callbacks without re-rendering.
+ * Turns each microphone frame (loudness plus zero-crossing rate) into
+ * start/end callbacks without re-rendering.
  *
  * The dashboard decides when this is active: while Atlas is thinking or
  * speaking the hook is off, so the speaker cannot trigger a new turn. The

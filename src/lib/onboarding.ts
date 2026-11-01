@@ -15,7 +15,7 @@ import {
   type PaceId,
   type ToneId,
 } from "@/components/start/start-data";
-import { CARTESIA_VOICES, type CartesiaVoiceId } from "@/lib/cartesia";
+import { DEEPGRAM_VOICES, type DeepgramVoiceId } from "@/lib/deepgram";
 
 const ONBOARDING_STORAGE_KEY = "atlas-onboarding";
 
@@ -27,7 +27,7 @@ const DEFAULT_PACE: PaceId = "steady";
 export type Onboarding = {
   name: string;
   ageRange: AgeRange | null;
-  voiceId: CartesiaVoiceId | null;
+  voiceId: DeepgramVoiceId | null;
   pace: PaceId;
   tones: ToneId[];
 };
@@ -35,7 +35,7 @@ export type Onboarding = {
 const AGE_VALUES = AGE_RANGES.map((range) => range.value);
 const PACE_IDS = PACES.map((pace) => pace.id);
 const TONE_IDS = TONE_STYLES.map((tone) => tone.id);
-const VOICE_IDS = Object.keys(CARTESIA_VOICES) as CartesiaVoiceId[];
+const VOICE_IDS = Object.keys(DEEPGRAM_VOICES) as DeepgramVoiceId[];
 
 function isOneOf<T extends string>(
   values: readonly T[],

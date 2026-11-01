@@ -32,7 +32,6 @@ const FRAME_STYLES: Record<TurnEvent["status"], string> = {
   "speak-delta": "bg-sage-wash text-sage-text",
   audio: "bg-muted text-ink-muted",
   "audio-done": "bg-muted text-ink-muted",
-  "audio-mp3": "bg-muted text-ink-muted",
   speaking: "bg-sage-wash text-sage-text",
   error: "bg-rose-500/10 text-rose-600 dark:text-rose-300",
 };

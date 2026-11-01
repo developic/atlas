@@ -53,7 +53,7 @@ export const TONE_STYLES = [
   },
 ] as const;
 
-// The matching samples are generated with Cartesia's generation_config.speed
+// The matching samples are generated with Deepgram's `speed`
 // at 0.7, 1, and 1.3. Keep these IDs in sync with that script.
 export const PACES = [
   {

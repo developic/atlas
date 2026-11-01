@@ -25,7 +25,7 @@ import {
   VoiceStep,
 } from "@/components/start/start-steps";
 import { useVoicePreview } from "@/components/start/use-voice-preview";
-import type { CartesiaVoiceId } from "@/lib/cartesia";
+import type { DeepgramVoiceId } from "@/lib/deepgram";
 import { saveOnboarding } from "@/lib/onboarding";
 import { cn } from "@/lib/utils";
 
@@ -35,7 +35,7 @@ export function StartFlow() {
   const [hasNavigated, setHasNavigated] = useState(false);
   const [name, setName] = useState("");
   const [ageRange, setAgeRange] = useState<AgeRange | null>(null);
-  const [voiceId, setVoiceId] = useState<CartesiaVoiceId | null>(null);
+  const [voiceId, setVoiceId] = useState<DeepgramVoiceId | null>(null);
   const [paceId, setPaceId] = useState<PaceId>("steady");
   const [toneChoices, setToneChoices] = useState<ToneId[]>([]);
   const [finalPreviewState, setFinalPreviewState] = useState<
@@ -212,7 +212,7 @@ export function StartFlow() {
     } catch {
       if (controller.signal.aborted) return;
 
-      // Keep the screen useful if Cartesia is unavailable: fall back to the
+      // Keep the screen useful if Deepgram is unavailable: fall back to the
       // matching pre-recorded sample.
       setFinalPreviewState("error");
       play(voiceId, selectedPace.id, "final");

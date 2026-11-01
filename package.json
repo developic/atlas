@@ -9,7 +9,7 @@
     "start": "next start",
     "lint": "oxlint --type-aware --react-plugin --jsx-a11y-plugin --nextjs-plugin --import-plugin",
     "typecheck": "next typegen && tsc --noEmit",
-    "generate:voices": "bun scripts/generate-cartesia-voices.mjs",
+    "generate:voices": "bun scripts/generate-deepgram-voices.mjs",
     "probe:omni": "bun scripts/omni-probe.mjs",
     "fmt": "bun fmt"
   },

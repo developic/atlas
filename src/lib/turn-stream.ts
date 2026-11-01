@@ -29,7 +29,6 @@ export type TurnEvent =
   | { status: "speak-delta"; text: string }
   | { status: "audio"; pcm: string; sampleRate: number; seq: number }
   | { status: "audio-done" }
-  | { status: "audio-mp3"; audio: string }
   | {
       status: "speaking";
       transcript: string;
@@ -51,7 +50,6 @@ export type TurnStreamHandlers = {
   onSpeakDelta?: (text: string) => void;
   onAudio?: (pcm: string, sampleRate: number) => void;
   onAudioDone?: () => void;
-  onAudioMp3?: (audio: string) => void;
   onSpeaking?: (event: SpeakingEvent) => void;
   /**
    * Debug tap: every valid event, before it is dispatched. The error frame
@@ -122,8 +120,6 @@ function isTurnEvent(value: unknown): value is TurnEvent {
         typeof event.sampleRate === "number" &&
         typeof event.seq === "number"
       );
-    case "audio-mp3":
-      return typeof event.audio === "string" && event.audio.length > 0;
     case "speaking":
       return (
         typeof event.transcript === "string" &&
@@ -214,9 +210,6 @@ export async function readTurnStream(
           break;
         case "audio-done":
           handlers.onAudioDone?.();
-          break;
-        case "audio-mp3":
-          handlers.onAudioMp3?.(event.audio);
           break;
         case "speaking":
           finalEvent = event;

@@ -1,21 +1,11 @@
 import {
-  CARTESIA_PACES,
-  CARTESIA_VOICES,
   getPreviewTranscript,
-  type CartesiaPace,
-  type CartesiaVoiceId,
-} from "@/lib/cartesia";
-import { synthesizeSpeech } from "@/lib/cartesia-server";
+  isDeepgramPace,
+  isDeepgramVoiceId,
+} from "@/lib/deepgram";
+import { synthesizeSpeech } from "@/lib/deepgram-server";
 
 const MAX_NAME_LENGTH = 40;
-
-function isVoiceId(value: unknown): value is CartesiaVoiceId {
-  return typeof value === "string" && value in CARTESIA_VOICES;
-}
-
-function isPace(value: unknown): value is CartesiaPace {
-  return typeof value === "string" && value in CARTESIA_PACES;
-}
 
 function cleanName(value: unknown) {
   if (typeof value !== "string") return "";
@@ -45,7 +35,7 @@ export async function POST(request: Request) {
   const voiceId = payload.voiceId;
   const pace = payload.pace;
 
-  if (!name || !isVoiceId(voiceId) || !isPace(pace)) {
+  if (!name || !isDeepgramVoiceId(voiceId) || !isDeepgramPace(pace)) {
     return Response.json({ error: "Invalid preview request." }, { status: 400 });
   }
 
@@ -63,7 +53,7 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
-    console.error("Cartesia preview request failed", error);
+    console.error("Deepgram preview request failed", error);
     return Response.json(
       { error: "Could not generate a preview." },
       { status: 502 },

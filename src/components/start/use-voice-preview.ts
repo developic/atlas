@@ -3,13 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
-  CARTESIA_VOICES,
-  type CartesiaPace,
-  type CartesiaVoiceId,
-} from "@/lib/cartesia";
+  DEEPGRAM_VOICES,
+  type DeepgramPace,
+  type DeepgramVoiceId,
+} from "@/lib/deepgram";
 
 export type VoiceOption = {
-  id: CartesiaVoiceId;
+  id: DeepgramVoiceId;
   name: string;
   gender: "Female" | "Male";
   lang: "US" | "UK";
@@ -61,7 +61,7 @@ const VOICE_OPTIONS: VoiceOption[] = [
   },
 ];
 
-function sampleSource(voiceId: CartesiaVoiceId, pace: CartesiaPace) {
+function sampleSource(voiceId: DeepgramVoiceId, pace: DeepgramPace) {
   return `/voices/${voiceId}-${pace}.mp3`;
 }
 
@@ -132,11 +132,11 @@ export function useVoicePreview() {
 
   const play = useCallback(
     (
-      voiceId: CartesiaVoiceId | null,
-      pace: CartesiaPace = "steady",
+      voiceId: DeepgramVoiceId | null,
+      pace: DeepgramPace = "steady",
       requestId: string | null = voiceId,
     ) => {
-      if (!voiceId || !(voiceId in CARTESIA_VOICES)) return;
+      if (!voiceId || !(voiceId in DEEPGRAM_VOICES)) return;
 
       startAudio(sampleSource(voiceId, pace), requestId);
     },

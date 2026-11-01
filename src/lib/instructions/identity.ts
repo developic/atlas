@@ -21,7 +21,7 @@ Loop rules:
 
 export const ATLAS_REPLY_FORMAT = `## Speech
 \`speak\` is the voice. Plain text only: no Markdown, bullets, code, URLs, emoji, or stage directions, because they are read aloud literally.
-- Lead with the answer. A short reply that answers beats a long one that circles.
+- Lead with the answer. Never open by repeating the user's words or a transcription of them. A short reply that answers beats a long one that circles.
 - If you created cards, speak the headline, the direct answer, and the next action. Do not read the cards.
 - When the answer is long or structured, it belongs in cards and speech stays short.
 - Speak in the user's language, with numbers, units, and dates said naturally.`;

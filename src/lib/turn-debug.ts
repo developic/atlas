@@ -111,8 +111,6 @@ export function eventSummary(event: TurnEvent): string {
       return `${event.sampleRate.toLocaleString()} Hz · seq ${event.seq} · ${formatWireBytes(base64Bytes(event.pcm))}`;
     case "audio-done":
       return "playback drained";
-    case "audio-mp3":
-      return `${formatWireBytes(base64Bytes(event.audio))} MP3 fallback`;
     case "speaking": {
       const cards = event.cards?.length ?? 0;
       const sources = event.sources?.length ?? 0;
@@ -136,11 +134,6 @@ export function displayTurnEvent(event: TurnEvent): unknown {
         sampleRate: event.sampleRate,
         seq: event.seq,
         pcm: `<${event.pcm.length} base64 chars>`,
-      };
-    case "audio-mp3":
-      return {
-        status: event.status,
-        audio: `<${event.audio.length} data-url chars>`,
       };
     case "speaking":
       return {

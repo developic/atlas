@@ -1,9 +1,10 @@
 /**
  * PCM helpers shared by the dashboard player and its tests.
  *
- * Cartesia's raw SSE stream is little-endian signed 16-bit mono. The player
- * turns each chunk into a Float32 AudioBuffer and schedules it on the audio
- * clock.
+ * Deepgram returns linear16 inside a WAV container; `deepgram-server` strips
+ * the header so the player receives little-endian signed 16-bit mono. The
+ * player turns each chunk into a Float32 AudioBuffer and schedules it on the
+ * audio clock.
  */
 
 export function base64ToBytes(value: string): Uint8Array {
