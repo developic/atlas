@@ -10,11 +10,9 @@
  *
  * Execution integrity is enforced in the loop, not in the prompt:
  *
- * - Every tool call resolves to an `ExecutionLedger` record (`exec_N`,
- *   `running → succeeded | failed`), and the tool message the model sees is
- *   stamped with that id and outcome. A failed execution is never success
- *   evidence, and an identical repeat call reuses the stored outcome instead
- *   of re-running the tool.
+ * - Identical repeat calls share one stored outcome instead of re-running
+ *   the tool, so a repeated search or fetch can never quietly become a
+ *   "fresh" execution.
  * - Spoken segments are collected only after their `speak` call passed the
  *   integrity gate, and are streamed to TTS only at finalization, so the
  *   interface never voices an unvalidated claim.
@@ -23,13 +21,9 @@
  */
 
 import { buildAtlasSystemPrompt } from "./atlas-prompt";
+import type { UserProfile } from "./onboarding";
 import { joinCardMarkdown, MAX_CARDS, type CardContent } from "./cards";
 import type { ChatMessage } from "./chat-message";
-import {
-  ExecutionLedger,
-  executionStamp,
-  type ExecutionRecord,
-} from "./execution-ledger";
 import { MAX_TRANSCRIPT_CHARS, normalizeSpeech } from "./orb-turn";
 import { OrbError } from "./orb-errors";
 import {
@@ -40,7 +34,6 @@ import {
   type ToolOutcome,
   type ToolRequest,
   type ToolResult,
-  type ToolRunContext,
 } from "./tools/registry";
 import { selectReplySources, type SourceLink } from "./source-links";
 import { validateSpeechClaim } from "./speech-integrity";
@@ -53,7 +46,6 @@ import type { TurnDebug, TurnDebugRound } from "./turn-debug";
 const BASETEN_MODEL = "meta-models/muse-spark-open-1026";
 const BASETEN_URL = "https://inference.baseten.co/v1/chat/completions";
 const DEFAULT_MAX_REPLY_TOKENS = 1_200;
-const MAX_TOOL_ROUNDS = 3;
 const MODEL_TIMEOUT_MS = 60_000;
 const REASONING_EFFORT = "low";
 const MAX_SESSION_CHARS = 64;
@@ -100,6 +92,18 @@ export type TurnContext = {
   session?: string;
   /** Attach raw provider payloads to the turn (development/debug only). */
   debug?: boolean;
+  /**
+   * Who Atlas is talking to, from `/start`. Rendered into the cached system
+   * prompt, so the model remembers the user across turns and sessions.
+   */
+  profile?: UserProfile;
+  /**
+   * Stills from the conversation's most recent media (e.g. a signed clip),
+   * as data URLs. Attached only to the immediately following turn so
+   * references like "that sign I just did" resolve against video, not just
+   * the transcribed words. The caller owns clearing them after one turn.
+   */
+  mediaFrames?: string[];
 };
 
 // ---------------------------------------------------------------------------
@@ -126,14 +130,13 @@ type TurnState = {
   speakSegments: string[];
 };
 
-/** One `tool_call_id` resolved, with the stamped content the model sees. */
+/** One `tool_call_id` resolved, with the content the model sees. */
 type CallOutcome = {
   call: NativeCall;
   content: string;
   ok: boolean;
-  /** True when the ledger deduped this call to an earlier execution. */
-  reused: boolean;
-  execId: string | null;
+  /** Request key for dedupe; null for a call that failed validation. */
+  key: string | null;
   /** Result of a successful execution; null for a failed or invalid call. */
   result: ToolResult | null;
 };
@@ -161,6 +164,10 @@ type ContentPart =
   | {
       type: "input_audio";
       input_audio: { data: string; format: "wav" | "mp3" };
+    }
+  | {
+      type: "image_url";
+      image_url: { url: string };
     };
 
 type Message = {
@@ -183,7 +190,7 @@ type TurnOptions = {
   allowTools?: boolean;
   /**
    * Send only the speak tool and require a native call to it. A final answer
-   * has to carry `evidence`, and only a tool call has an evidence slot.
+   * must pass validation, and only a tool call runs it.
    */
   forceSpeak?: boolean;
 };
@@ -219,7 +226,6 @@ export async function respondToAudio(
   return requestTurn(
     [
       { type: "input_audio", input_audio: { data: audio.toString("base64"), format: audioFormat(mimeType) } },
-      { type: "text", text: "Transcribe and answer this recording." },
     ],
     history,
     callbacks,
@@ -258,10 +264,27 @@ async function requestTurn(
   context: TurnContext,
 ): Promise<OmniTurn> {
   const apiKey = getApiKey();
+  const userContent: ContentPart[] = [...content];
+  const frames = (context.mediaFrames ?? []).filter(
+    (frame): frame is string =>
+      typeof frame === "string" && frame.startsWith("data:image/"),
+  );
+
+  if (frames.length > 0) {
+    for (const frame of frames) {
+      userContent.push({ type: "image_url", image_url: { url: frame } });
+    }
+
+    userContent.push({
+      type: "text",
+      text: "Earlier in this conversation the user shared video; these stills are from it. Resolve references like \"that\", \"it\", or \"what I just showed\" against the stills.",
+    });
+  }
+
   const messages: Message[] = [
-    { role: "system", content: buildAtlasSystemPrompt() },
+    { role: "system", content: buildAtlasSystemPrompt(new Date(), context.profile) },
     ...history.map((message) => ({ role: message.role, content: message.content })),
-    { role: "user", content },
+    { role: "user", content: userContent },
   ];
 
   const run: TurnRun = {
@@ -278,13 +301,14 @@ async function requestTurn(
     cards: [],
     speakSegments: [],
   };
-  const ledger = new ExecutionLedger();
-  /** In-flight promises per execution record id, so a repeated identical
-   *  call attaches to the stored outcome instead of re-running the tool. */
-  const cache = new Map<string, Promise<ToolOutcome>>();
-  /** Exec ids whose successful result was already folded into the turn, so a
-   *  deduped repeat call cannot double-commit a card or speech segment. */
+  /** Request keys whose successful result was already folded into the turn,
+   *  so a deduped repeat call cannot double-commit a card or speech segment. */
   const committed = new Set<string>();
+  /** Stored tool outcomes for the whole turn, keyed by request, so an
+   *  identical repeat call attaches instead of re-running the tool. */
+  const runCache = new Map<string, Promise<ToolOutcome>>();
+  /** Whether any action tool ran this turn; gates fabrication repair. */
+  let actionsRan = false;
 
   let result: ModelResult | null = null;
   let toolRounds = 0;
@@ -296,11 +320,6 @@ async function requestTurn(
 
     const seen = reporterFor(callbacks);
 
-    // At the round cap, force a speak-only answer.
-    if (toolRounds >= MAX_TOOL_ROUNDS && result) {
-      return forceAnswer(apiKey, messages, result, state, toolRounds, ledger, run, seen);
-    }
-
     result = await runModelTurn(apiKey, messages, seen, run);
     const calls = parseNativeToolCalls(result.nativeToolCalls);
 
@@ -310,7 +329,7 @@ async function requestTurn(
         messages,
         state,
         toolRounds,
-        ledger,
+        actionsRan,
         run,
         seen,
       );
@@ -332,16 +351,21 @@ async function requestTurn(
       applyTranscript(call.request.transcript, state, seen);
     }
 
-    const outcomes = await executeNativeCalls(calls, ledger, cache, run.signal);
+    // A `speak` sharing its round with an action already sees its sibling
+    // attempts, the way synchronous record-begin used to grant.
+    const roundActionsRan =
+      actionsRan ||
+      calls.some((call) => call.request && call.request.tool !== "speak");
+    const outcomes = await executeNativeCalls(calls, roundActionsRan, runCache, run.signal);
 
     for (const outcome of outcomes) {
-      if (!outcome.ok || !outcome.result || !outcome.execId) continue;
+      if (!outcome.ok || !outcome.result || !outcome.key) continue;
 
       // A deduped repeat call re-resolves its stored result; fold it into the
       // turn state exactly once.
-      if (committed.has(outcome.execId)) continue;
+      if (committed.has(outcome.key)) continue;
 
-      committed.add(outcome.execId);
+      committed.add(outcome.key);
       state.sources.push(...outcome.result.sources);
       collectCards([outcome.result], state);
 
@@ -356,17 +380,22 @@ async function requestTurn(
     const allOk = outcomes.every((outcome) => outcome.ok);
 
     if (allOk && calls.every(isCreateOrSpeak) && state.speakSegments.length > 0) {
-      return finalize(result, state, toolRounds, seen, ledger, run.debug);
+      return finalize(result, state, toolRounds, seen, run.debug);
     }
 
-    // Non-terminal: report every outcome — stamped, including failures — to
-    // the model and keep looping. Delivery marks the executions the model can
-    // now cite as evidence.
+    // Non-terminal: report every outcome, including failures, to the model
+    // and keep looping. Each tool message carries its round number so the
+    // model can track its progress. The turn ends when the model stops calling
+    // tools; the 90 s turn budget aborts a runaway loop.
+    const roundLabel = `[Round ${toolRounds + 1}]`;
     messages.push(echoedAssistant(result, calls));
     for (const [index, outcome] of outcomes.entries()) {
-      messages.push({ role: "tool", tool_call_id: calls[index].id, content: outcome.content });
+      messages.push({ role: "tool", tool_call_id: calls[index].id, content: `${roundLabel} ${outcome.content}` });
     }
-    ledger.markDelivered(outcomes.map((outcome) => outcome.execId));
+
+    if (calls.some((call) => call.request && call.request.tool !== "speak")) {
+      actionsRan = true;
+    }
 
     toolRounds += 1;
   }
@@ -433,11 +462,9 @@ function toolDetail(tool: string, args: Record<string, string>): string | undefi
 
 /**
  * End the turn when the provider returned no native tool calls. The content
- * itself is the candidate utterance (usually speech, possibly the legacy
- * `{"transcript","speak"}` text envelope). Plain content has no native
- * evidence slot, so it is validated with empty evidence: when actions ran
- * this turn, prose cannot claim them, and tool-call JSON arriving as text is
- * structurally rejected — never replayed into tool calls.
+ * itself is the candidate utterance: when actions ran this turn, prose cannot
+ * claim them, and tool-call JSON arriving as text is structurally rejected —
+ * never replayed into tool calls.
  *
  * Rejected replies are withheld: the model gets a corrective message and the
  * loop continues so it can answer through the native `speak` tool instead.
@@ -447,58 +474,32 @@ async function endWithContent(
   messages: Message[],
   state: TurnState,
   toolRounds: number,
-  ledger: ExecutionLedger,
+  actionsRan: boolean,
   run: TurnRun,
   seen: TurnCallbacks,
 ): Promise<OmniTurn | null> {
   const plain = result.content.trim();
 
   if (plain) {
-    const candidate = plainReplyCandidate(plain);
-    const verdict = validateSpeechClaim({ text: candidate.text, evidence: [], ledger });
+    const verdict = validateSpeechClaim({ text: plain, actionsRan });
 
     if (!verdict.ok) {
       messages.push({ role: "assistant", content: result.content });
       messages.push({
         role: "user",
         content: [
-          `Your previous reply was withheld instead of being spoken: ${verdict.reason}`,
-          `Executions this turn: ${ledger.describe()}.`,
-          "Answer now with the native `speak` tool — pass `evidence` with the stamped exec ids if you report on an action — or reply without claiming that any action ran.",
+          `Your previous reply was withheld instead of being spoken: ${verdict.reason}.`,
+          "Answer now with the native `speak` tool, or reply without claiming that any action ran.",
         ].join(" "),
       });
 
       return null;
     }
 
-    commitSpeech(candidate.text, state);
-    if (candidate.transcript) applyTranscript(candidate.transcript, state, seen);
+    commitSpeech(plain, state);
   }
 
-  return finalize(result, state, toolRounds, seen, ledger, run.debug);
-}
-
-type PlainReply = { text: string; transcript?: string };
-
-/** Split a plain-text reply into its utterance and optional transcript. */
-function plainReplyCandidate(plain: string): PlainReply {
-  try {
-    const envelope = JSON.parse(plain) as { transcript?: unknown; speak?: unknown };
-
-    if (typeof envelope.speak === "string" && envelope.speak.trim()) {
-      return {
-        text: envelope.speak.trim(),
-        transcript:
-          typeof envelope.transcript === "string" && envelope.transcript.trim()
-            ? envelope.transcript.trim()
-            : undefined,
-      };
-    }
-  } catch {
-    // Ordinary speech; fall through.
-  }
-
-  return { text: plain };
+  return finalize(result, state, toolRounds, seen, run.debug);
 }
 
 /**
@@ -507,11 +508,15 @@ function plainReplyCandidate(plain: string): PlainReply {
  */
 function collectCards(cards: ToolResult[], state: TurnState): void {
   for (const result of cards) {
-    if (!result.card || state.cards.length >= MAX_CARDS) continue;
+    const produced = result.cards ?? [];
 
-    const card = { ...result.card, id: uniqueCardId(result.card.id, state.cards) };
+    for (const producedCard of produced) {
+      if (state.cards.length >= MAX_CARDS) continue;
 
-    state.cards.push(card);
+      const card = { ...producedCard, id: uniqueCardId(producedCard.id, state.cards) };
+
+      state.cards.push(card);
+    }
   }
 }
 
@@ -526,142 +531,54 @@ function uniqueCardId(raw: string, existing: CardContent[]): string {
 }
 
 // ---------------------------------------------------------------------------
-// Forced final answer at the round cap
-// ---------------------------------------------------------------------------
-
-/**
- * The round cap is reached. The model gets one final, speak-only prompt: the
- * speak tool stays available because a final answer must be able to carry
- * `evidence`, and only a tool call has an evidence slot. Every candidate
- * utterance still passes the integrity gate; an unsupported forced answer is a
- * `no_reply`, never a spoken fabrication.
- */
-async function forceAnswer(
-  apiKey: string,
-  messages: Message[],
-  result: ModelResult,
-  state: TurnState,
-  toolRounds: number,
-  ledger: ExecutionLedger,
-  run: TurnRun,
-  seen: TurnCallbacks,
-): Promise<OmniTurn> {
-  const forcedMessages: Message[] = [
-    ...messages,
-    { role: "assistant", content: result.content },
-    {
-      role: "user",
-      content:
-        "No more search, fetch, create, or time tool calls are allowed. Use the speak tool to give your final answer now, passing `evidence` with the stamped exec ids if you report on any action.",
-    },
-  ];
-
-  const forced = await runModelTurn(apiKey, forcedMessages, seen, run, {
-    allowTools: true,
-    forceSpeak: true,
-  });
-
-  if (forced.nativeToolCalls.length > 0) {
-    // A final speak call is allowed through; anything else is terminal.
-    const leftover = parseNativeToolCalls(forced.nativeToolCalls);
-    const stray = leftover.filter((call) => call.request?.tool !== "speak");
-
-    if (stray.length > 0) {
-      throw new OrbError("no_reply", "The assistant kept requesting tools instead of answering.");
-    }
-
-    for (const call of leftover) {
-      if (call.request?.tool !== "speak") continue;
-
-      const verdict = validateSpeechClaim({
-        text: call.request.arguments.text ?? "",
-        evidence: call.request.evidence,
-        ledger,
-      });
-
-      if (!verdict.ok) {
-        throw new OrbError(
-          "no_reply",
-          `The forced final answer failed integrity validation: ${verdict.reason}`,
-        );
-      }
-
-      commitSpeech(call.request.arguments.text ?? "", state);
-    }
-  } else if (forced.content.trim()) {
-    const verdict = validateSpeechClaim({ text: forced.content.trim(), evidence: [], ledger });
-
-    if (!verdict.ok) {
-      throw new OrbError(
-        "no_reply",
-        `The forced final answer failed integrity validation: ${verdict.reason}`,
-      );
-    }
-
-    commitSpeech(forced.content.trim(), state);
-  }
-
-  if (state.speakSegments.length === 0) {
-    throw new OrbError("no_reply", "The assistant did not produce a spoken reply.");
-  }
-
-  return finalize(forced, state, toolRounds, seen, ledger, run.debug);
-}
-
-// ---------------------------------------------------------------------------
-// Tool execution with the ledger
+// Tool execution with request-key dedupe
 // ---------------------------------------------------------------------------
 
 function requestKey(request: ToolRequest): string {
-  return `${request.tool}:${JSON.stringify(request.arguments)}:${JSON.stringify(request.evidence)}`;
+  return `${request.tool}:${JSON.stringify(request.arguments)}`;
 }
 
 /**
  * Run native calls in place and answer every call, including one that failed
  * argument validation, so each `tool_call_id` gets a tool message back.
  *
- * Records begin synchronously in call order before any promise runs, so a
- * `speak` call in the same round already sees its sibling action attempts.
- * Identical repeat calls reuse their record's stored outcome and never
- * re-run the tool, so a cached failure cannot become a fresh success.
+ * Identical calls share one stored outcome and never re-run the tool, so a
+ * repeated search cannot quietly become a "fresh" execution. Outcomes carry
+ * the raw tool content; nothing is stamped, and there is nothing to cite.
  */
 async function executeNativeCalls(
   calls: NativeCall[],
-  ledger: ExecutionLedger,
-  cache: Map<string, Promise<ToolOutcome>>,
+  actionsRan: boolean,
+  runCache: Map<string, Promise<ToolOutcome>>,
   signal?: AbortSignal,
 ): Promise<CallOutcome[]> {
-  const entries = calls.map((call) => {
-    if (!call.request) {
-      return { call, request: null, record: null, reused: false };
-    }
-
-    const { record, reused } = ledger.begin(call.request.tool, requestKey(call.request));
-
-    return { call, request: call.request, record, reused };
-  });
-
   return Promise.all(
-    entries.map(async (entry): Promise<CallOutcome> => {
-      if (!entry.request || !entry.record) {
+    calls.map(async (call): Promise<CallOutcome> => {
+      if (!call.request) {
         return {
-          call: entry.call,
-          content: entry.call.error,
+          call,
+          content: call.error,
           ok: false,
-          reused: false,
-          execId: null,
+          key: null,
           result: null,
         };
       }
 
-      const outcome = await dispatchExecution(entry.request, entry.record, ledger, cache, signal);
+      const key = requestKey(call.request);
+      let promise = runCache.get(key);
+
+      if (!promise) {
+        promise = runRequest(call.request, actionsRan, signal);
+        runCache.set(key, promise);
+      }
+
+      const outcome = await promise;
 
       return {
-        call: entry.call,
-        content: `${executionStamp(entry.record, entry.reused)}\n${outcome.ok ? outcome.result.content : outcome.error}`,
+        call,
+        content: outcome.ok ? outcome.result.content : outcome.error,
         ok: outcome.ok,
-        reused: entry.reused,
-        execId: entry.record.id,
+        key,
         result: outcome.ok ? outcome.result : null,
       };
     }),
@@ -669,35 +586,17 @@ async function executeNativeCalls(
 }
 
 /**
- * Run one request through the registry, deduplicating on the record: the
- * first run of an execution stores its promise, and every identical repeat
- * attaches to that stored outcome instead of re-running the tool.
+ * Run one request through the registry. Tools never throw in the normal
+ * path; keep an unexpected throw from killing the turn instead of the model.
  */
-async function dispatchExecution(
+async function runRequest(
   request: ToolRequest,
-  record: ExecutionRecord,
-  ledger: ExecutionLedger,
-  cache: Map<string, Promise<ToolOutcome>>,
+  actionsRan: boolean,
   signal?: AbortSignal,
 ): Promise<ToolOutcome> {
-  const pending = cache.get(record.id);
-
-  if (pending) return pending;
-
-  const context: ToolRunContext | undefined =
-    request.tool === "speak"
-      ? { ledger, record, evidence: request.evidence }
-      : { ledger, record, evidence: [] };
-
-  const outcome = executeTool(request.tool, request.arguments, signal, context);
-
-  cache.set(record.id, outcome);
-
   try {
-    return await outcome;
+    return await executeTool(request.tool, request.arguments, signal, actionsRan);
   } catch (error) {
-    // Tools never throw in the normal path; keep an unexpected throw from
-    // killing the turn instead of the model.
     const reason = error instanceof Error ? error.message : "unknown failure";
 
     return { ok: false, error: `The ${request.tool} tool failed unexpectedly: ${reason}` };
@@ -751,17 +650,13 @@ function finalize(
   state: TurnState,
   toolRounds: number,
   seen: TurnCallbacks,
-  ledger: ExecutionLedger,
   debug?: DebugCapture,
 ): OmniTurn {
   const segments = speakableSegments(state.speakSegments);
   const speak = normalizeSpeech(segments.join(" "));
 
   if (!speak) {
-    throw new OrbError(
-      "no_reply",
-      `The assistant returned no reply; the response was withheld (executions: ${ledger.describe()}).`,
-    );
+    throw new OrbError("no_reply", "The assistant returned no reply.");
   }
 
   // Speech isolation: deltas go out only now, after every segment passed the

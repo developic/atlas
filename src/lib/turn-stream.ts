@@ -24,7 +24,6 @@ import { isTurnDebug, type TurnDebug } from "./turn-debug";
  */
 export type TurnEvent =
   | { status: "transcript"; transcript: string }
-  | { status: "searching"; query?: string }
   | { status: "tool"; tool: string; detail?: string }
   | { status: "speak-delta"; text: string }
   | { status: "audio"; pcm: string; sampleRate: number; seq: number }
@@ -45,7 +44,6 @@ export type SpeakingEvent = Extract<TurnEvent, { status: "speaking" }>;
 
 export type TurnStreamHandlers = {
   onTranscript?: (text: string) => void;
-  onSearching?: (query?: string) => void;
   onTool?: (tool: string, detail?: string) => void;
   onSpeakDelta?: (text: string) => void;
   onAudio?: (pcm: string, sampleRate: number) => void;
@@ -102,8 +100,6 @@ function isTurnEvent(value: unknown): value is TurnEvent {
   switch (event.status) {
     case "audio-done":
       return true;
-    case "searching":
-      return event.query === undefined || typeof event.query === "string";
     case "transcript":
       return typeof event.transcript === "string";
     case "tool":
@@ -195,9 +191,6 @@ export async function readTurnStream(
       switch (event.status) {
         case "transcript":
           handlers.onTranscript?.(event.transcript);
-          break;
-        case "searching":
-          handlers.onSearching?.(event.query);
           break;
         case "tool":
           handlers.onTool?.(event.tool, event.detail);

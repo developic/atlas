@@ -101,8 +101,6 @@ export function eventSummary(event: TurnEvent): string {
   switch (event.status) {
     case "transcript":
       return `“${truncate(event.transcript)}”`;
-    case "searching":
-      return event.query ? `“${truncate(event.query)}”` : "web search";
     case "tool":
       return event.detail ? `${event.tool} · ${truncate(event.detail)}` : event.tool;
     case "speak-delta":

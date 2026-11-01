@@ -31,7 +31,6 @@ export type Onboarding = {
   pace: PaceId;
   tones: ToneId[];
 };
-
 const AGE_VALUES = AGE_RANGES.map((range) => range.value);
 const PACE_IDS = PACES.map((pace) => pace.id);
 const TONE_IDS = TONE_STYLES.map((tone) => tone.id);
@@ -93,4 +92,23 @@ export function loadOnboarding(): Onboarding | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The slice of onboarding the model should remember: who it is talking to.
+ * Voice and pace stay client-side; they change how Atlas sounds, not what it
+ * knows. Returns undefined when there is no name to remember.
+ */
+export type UserProfile = {
+  name: string;
+  ageRange: AgeRange | null;
+  tones: ToneId[];
+};
+
+export function parseProfile(value: unknown): UserProfile | undefined {
+  const parsed = parseOnboarding(value);
+
+  if (!parsed || !parsed.name) return undefined;
+
+  return { name: parsed.name, ageRange: parsed.ageRange, tones: parsed.tones };
 }

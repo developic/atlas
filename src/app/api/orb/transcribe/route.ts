@@ -1,9 +1,9 @@
 import {
   assertSignVideo,
   DEFAULT_SIGN_PROMPT,
-  NvidiaSignError,
+  SignVideoError,
   transcribeSigningVideo,
-} from "@/lib/nvidia-sign";
+} from "@/lib/sign-video";
 
 const MAX_VIDEO_BYTES = 15 * 1024 * 1024;
 
@@ -46,12 +46,48 @@ export async function POST(request: Request) {
       buffer,
       DEFAULT_SIGN_PROMPT,
       request.signal,
-      "opencode",
     );
 
-    return Response.json({ transcript: result.transcript });
+    // The reply should end with a "Transcription:" line holding the best
+    // reading, but the model renames the final label across runs — so fall
+    // back to the last non-empty line as long as it is short and not a
+    // heading. Only that line enters the turn: the analysis must never be
+    // spoken. A long or missing final line means the read failed: surface a
+    // retry instead of speaking the analysis aloud. A short bare reply (no
+    // analysis at all) is used as-is.
+    const words = (value: string) => value.split(/\s+/).filter(Boolean);
+    // Strip list markers, emphasis, and spoken-output labels from either end.
+    const cleanLabel = (value: string) =>
+      value
+        .replace(/^(?:[A-Za-z][A-Za-z'’\- ]{0,28}:\s*)+/, "")
+        .replace(/^[-\u2022\s]*((?:segment|step|pass)\s+\d+\s*:?\s*)+/i, "")
+        .replace(/^[\s*#_"“”]+|[\s*_"“”]+$/g, "")
+        .trim();
+    const explicit = cleanLabel(
+      result.transcript.match(/(?:^|\n)\s*Transcription:\s*([\s\S]+?)\s*$/im)?.[1] ?? "",
+    );
+    const tailLines = result.transcript
+      .split("\n")
+      .map((line) => line.trim().replace(/^\*+|\*+$/g, "").trim())
+      .filter(Boolean);
+    const tail = tailLines[tailLines.length - 1] ?? "";
+    const isHeading =
+      /^(#{1,6}\s+|\d+\.\s*|pass\s+\d|segments?|signs?|utterance|english\s*:)/i.test(tail);
+    const unlabeled = cleanLabel(tail);
+    const shortTail =
+      unlabeled && !isHeading && words(unlabeled).length <= 12 ? unlabeled : "";
+    const utterance = explicit || shortTail || (words(result.transcript.trim()).length <= 12 ? result.transcript.trim() : "");
+
+    if (!utterance || words(utterance).length > 30 || /^unclear\.?$/i.test(utterance)) {
+      return Response.json(
+        { error: "I couldn't read that signing. Try again." },
+        { status: 502 },
+      );
+    }
+
+    return Response.json({ transcript: utterance });
   } catch (error) {
-    if (error instanceof NvidiaSignError) {
+    if (error instanceof SignVideoError) {
       return Response.json({ error: error.message }, { status: error.status });
     }
 

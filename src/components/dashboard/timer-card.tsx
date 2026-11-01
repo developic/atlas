@@ -73,7 +73,7 @@ export function TimerCard({ attrs }: { attrs: TimerAttrs }) {
           : "Done";
 
   return (
-    <div className="my-3 rounded-xl border border-line bg-paper/80 p-3">
+    <div className="rounded-xl border border-line bg-paper/80 p-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate font-mono text-xs font-semibold text-ink">

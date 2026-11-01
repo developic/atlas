@@ -10,14 +10,17 @@ import {
   type OrbPreview,
 } from "@/components/dashboard/orb-chrome";
 import { OrbHalo } from "@/components/dashboard/orb-stage";
-import { PromptDock } from "@/components/dashboard/prompt-dock";
+import { Chatbox } from "@/components/dashboard/chatbox";
 import { TurnDebugPanel } from "@/components/dashboard/turn-debug-panel";
 import { MAX_SESSION_MESSAGES, useOrbTurn } from "@/components/dashboard/use-orb-turn";
 import { useSignVideo } from "@/components/dashboard/use-sign-video";
-import { useVoiceActivity } from "@/components/dashboard/use-voice-activity";
+import { sampleVideoStills } from "@/lib/sign-stills";
+import { useSileroVad } from "@/components/dashboard/use-silero-vad";
 import { useVoiceLevel } from "@/components/dashboard/use-voice-level";
-import { VOICE_ACTIVITY_CONFIG } from "@/components/dashboard/voice-activity";
+import { encodeWav } from "@/lib/wav";
 import { AdaptiveCard } from "@/components/layout/adaptive-card";
+import { SidebarPanel } from "@/components/dashboard/sidebar-panel";
+import { cardKind } from "@/lib/cards";
 import { MAX_CARDS } from "@/lib/cards";
 import {
   isChatMessage,
@@ -28,11 +31,24 @@ import { toolTraceLabel } from "@/lib/tool-trace";
 import { useLayoutContext } from "@/lib/layout/use-layout-context";
 import { ParticlesOrb } from "@/registry/orbe/particles-orb/particles-orb";
 
-const SESSION_KEY = "atlas-orb-session";
+const HISTORY_KEY = "history";
+/**
+ * History lives in localStorage so it survives tab closes and holds more
+ * than a session store. On a write failure (quota or blocked storage), retry
+ * with a smaller tail instead of losing persistence entirely.
+ */
+function persistHistory(history: ChatMessage[]) {
+  for (const tail of [history, history.slice(-250), history.slice(-100)]) {
+    try {
+      window.localStorage.setItem(HISTORY_KEY, JSON.stringify(tail));
+      return;
+    } catch {
+      // Quota or blocked storage: try a smaller tail, then give up quietly.
+    }
+  }
+}
 /** Leave the speaker tail behind before listening again. */
 const POST_REPLY_ARM_DELAY = 900;
-/** Keep a warm recorder ready, but drop it if speech never starts. */
-const PRE_ROLL_LIMIT = 4_000;
 /** A turn keeps this many tool rows with its reply. */
 const SESSION_TOOL_LIMIT = 6;
 
@@ -49,11 +65,11 @@ const PREVIEWS: { value: OrbPreview; label: string }[] = [
   { value: "disabled", label: "Muted" },
 ];
 
-function readSession(): ChatMessage[] {
+function readHistory(): ChatMessage[] {
   if (typeof window === "undefined") return [];
 
   try {
-    const raw = window.sessionStorage.getItem(SESSION_KEY);
+    const raw = window.localStorage.getItem(HISTORY_KEY);
     if (!raw) return [];
 
     const parsed = JSON.parse(raw) as unknown;
@@ -86,28 +102,15 @@ function readSession(): ChatMessage[] {
 }
 
 export function DashboardFlow() {
-  const {
-    levelRef,
-    activityRef,
-    status,
-    toggle,
-    recording,
-    clipBlob,
-    startRecording,
-    stopRecording,
-    discardRecording,
-    clearClip,
-  } = useVoiceLevel();
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const sentClipRef = useRef<Blob | null>(null);
+  const { levelRef, status, toggle, getStream } = useVoiceLevel();
   const sentSignRef = useRef<Blob | null>(null);
+  // Stills from the most recent signed clip. The immediately following turn
+  // carries them once ("that sign I just did"), then they are dropped.
+  const mediaStashRef = useRef<string[] | null>(null);
   const [signTranscribing, setSignTranscribing] = useState(false);
-  const preRollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const speechStartedRef = useRef(false);
-  // Hydration-safe: start empty on server and first client render, hydrate from sessionStorage after mount.
+  // Hydration-safe: start empty on server and first client render, hydrate from localStorage after mount.
   const [history, setHistory] = useState<ChatMessage[]>([]);
   const [hydrated, setHydrated] = useState(false);
-  const [preRollReady, setPreRollReady] = useState(false);
   const [preview, setPreview] = useState<OrbPreview>("auto");
   const [progress, setProgress] = useState(0.5);
   const [orbSize, setOrbSize] = useState(360);
@@ -118,18 +121,15 @@ export function DashboardFlow() {
     aiState,
     aiReply,
     aiError,
-    aiAudio,
     respond,
     sendText,
     stopTurn,
     primePlayback,
-    onAudioEnded,
-    onAudioFailed,
     dismissError,
     failTurn,
     wire,
     clearWire,
-  } = useOrbTurn({ history, setHistory, audioRef });
+  } = useOrbTurn({ history, setHistory });
   const {
     status: signStatus,
     errorDetail: signError,
@@ -144,12 +144,26 @@ export function DashboardFlow() {
     clearClip: clearSignClip,
   } = useSignVideo();
 
-  const clearPreRollTimer = useCallback(() => {
-    if (preRollTimerRef.current !== null) {
-      clearTimeout(preRollTimerRef.current);
-      preRollTimerRef.current = null;
-    }
+  const takeStashedMedia = useCallback((): string[] | undefined => {
+    const stashed = mediaStashRef.current;
+    mediaStashRef.current = null;
+
+    return stashed && stashed.length > 0 ? stashed : undefined;
   }, []);
+
+  const sendTextWithMedia = useCallback(
+    async (text: string) => {
+      await sendText(text, { mediaFrames: takeStashedMedia() });
+    },
+    [sendText, takeStashedMedia],
+  );
+
+  const respondWithMedia = useCallback(
+    async (blob: Blob, session: ChatMessage[]) => {
+      await respond(blob, session, { mediaFrames: takeStashedMedia() });
+    },
+    [respond, takeStashedMedia],
+  );
 
   const closeDebug = useCallback(() => setDebugOpen(false), []);
 
@@ -167,20 +181,16 @@ export function DashboardFlow() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  // Hydrate from sessionStorage after mount — keeps server and first client render identical.
+  // Hydrate from localStorage after mount — keeps server and first client render identical.
   useEffect(() => {
-    setHistory(readSession());
+    setHistory(readHistory());
     setHydrated(true);
   }, []);
 
   useEffect(() => {
     // The session is text only: transcripts and replies, never clips. Skip until hydrated to avoid overwriting with empty.
     if (!hydrated) return;
-    try {
-      window.sessionStorage.setItem(SESSION_KEY, JSON.stringify(history));
-    } catch {
-      // Storage can be disabled; the in-memory session still works.
-    }
+    persistHistory(history);
   }, [history, hydrated]);
 
   const live = status === "live";
@@ -188,7 +198,6 @@ export function DashboardFlow() {
   const previewing = preview !== "auto";
   const vadActive =
     live &&
-    recording !== "ready" &&
     aiState !== "thinking" &&
     aiState !== "searching" &&
     aiState !== "speaking" &&
@@ -209,10 +218,18 @@ export function DashboardFlow() {
   const showCards = hydrated && cards.length > 0;
 
   // A new turn replaces the cards, so an id from the old turn cannot stay open.
-  // The first card of the new turn opens automatically, so nothing needs a
-  // click to be read.
+  // The first collapsible card of the new turn opens automatically, so nothing
+  // needs a click to be read. Sidebars stay open on their own.
   const lastAssistantId = lastAssistant?.id;
-  const firstCardId = cards[0]?.id ?? null;
+  const normalCards = useMemo(
+    () => cards.filter((card) => cardKind(card) !== "sidebar"),
+    [cards],
+  );
+  const sidebars = useMemo(
+    () => cards.filter((card) => cardKind(card) === "sidebar"),
+    [cards],
+  );
+  const firstCardId = normalCards[0]?.id ?? null;
   useEffect(() => {
     setOpenCardId(firstCardId);
   }, [lastAssistantId, firstCardId]);
@@ -222,9 +239,13 @@ export function DashboardFlow() {
     if (!cards.some((card) => card.id === openCardId)) setOpenCardId(null);
   }, [cards, openCardId]);
 
-  const splitAt = Math.ceil(cards.length / 2);
-  const leftCards = cards.slice(0, splitAt).slice(0, 3);
-  const rightCards = cards.slice(splitAt).slice(0, 3);
+  // Pinned cards hold their side; untyped cards fill the remaining slots.
+  const leftPinned = normalCards.filter((card) => cardKind(card) === "left");
+  const rightPinned = normalCards.filter((card) => cardKind(card) === "right");
+  const autoCards = normalCards.filter((card) => cardKind(card) === "card");
+  const autoLeftCount = Math.max(0, 3 - leftPinned.length);
+  const leftCards = [...leftPinned, ...autoCards.slice(0, autoLeftCount)].slice(0, 3);
+  const rightCards = [...rightPinned, ...autoCards.slice(autoLeftCount)].slice(0, 3);
 
   useEffect(() => {
     // Fit orb into desktop viewport; when cards are visible, shrink orb so
@@ -258,46 +279,6 @@ export function DashboardFlow() {
   }, [showCards]);
 
   useEffect(() => {
-    if (!vadActive) {
-      const timer = setTimeout(() => setPreRollReady(false), 0);
-      return () => clearTimeout(timer);
-    }
-
-    if (!aiReply) {
-      const timer = setTimeout(() => setPreRollReady(true), 0);
-      return () => clearTimeout(timer);
-    }
-
-    // Start the warm recorder only after the speaker tail has cleared, so the
-    // pre-roll does not capture Atlas's own voice.
-    const close = setTimeout(() => setPreRollReady(false), 0);
-    const open = setTimeout(
-      () => setPreRollReady(true),
-      POST_REPLY_ARM_DELAY,
-    );
-
-    return () => {
-      clearTimeout(close);
-      clearTimeout(open);
-    };
-  }, [aiReply, vadActive]);
-
-  useEffect(() => {
-    if (!vadActive) clearPreRollTimer();
-
-    return () => clearPreRollTimer();
-  }, [clearPreRollTimer, vadActive]);
-
-  useEffect(() => {
-    if (recording !== "ready" || !clipBlob) return;
-    if (sentClipRef.current === clipBlob) return;
-
-    sentClipRef.current = clipBlob;
-    // Drop the clip as soon as the turn is over. Only text is kept.
-    void respond(clipBlob, history).finally(clearClip);
-  }, [clearClip, clipBlob, history, recording, respond]);
-
-  useEffect(() => {
     if (!signClip || signClip.size === 0) return;
     if (sentSignRef.current === signClip) return;
 
@@ -308,21 +289,34 @@ export function DashboardFlow() {
     // The clip is transcribed with only the transcription prompt — never the
     // Atlas system prompt. The returned text enters the normal turn as if
     // typed, so the full prompt, tools, cards, and speech apply there.
+    // Stills sampled here become the next turn's media context ("that sign
+    // I just did"); a newer clip replaces them.
     const transcribe = async () => {
       try {
         const form = new FormData();
         form.append("video", signClip);
 
-        const response = await fetch("/api/orb/transcribe", {
-          method: "POST",
-          body: form,
-        });
+        const [response] = await Promise.all([
+          fetch("/api/orb/transcribe", {
+            method: "POST",
+            body: form,
+          }),
+          sampleVideoStills(signClip).then(
+            (stills) => {
+              mediaStashRef.current = stills.length > 0 ? stills : null;
+            },
+            () => {
+              mediaStashRef.current = null;
+            },
+          ),
+        ]);
         const payload = (await response.json()) as {
           transcript?: string;
           error?: string;
         };
 
         if (!response.ok) {
+          mediaStashRef.current = null;
           failTurn(payload.error ?? "I couldn’t read that signing. Try again.");
           return;
         }
@@ -330,9 +324,11 @@ export function DashboardFlow() {
         if (payload.transcript) {
           await sendText(payload.transcript);
         } else {
+          mediaStashRef.current = null;
           failTurn("I couldn’t read that signing. Try again.");
         }
       } catch {
+        mediaStashRef.current = null;
         failTurn("I couldn’t read that signing. Try again.");
       } finally {
         setSignTranscribing(false);
@@ -381,75 +377,74 @@ export function DashboardFlow() {
   }, [canSign, dismissError, failTurn, signing, startSignRecording, stopSignRecording]);
 
   const handleSpeechStart = useCallback(() => {
-    clearPreRollTimer();
-    speechStartedRef.current = true;
     dismissError();
-    return startRecording();
-  }, [clearPreRollTimer, dismissError, startRecording]);
+  }, [dismissError]);
 
   const handleSpeechEnd = useCallback(
-    (voicedMs: number) => {
-      if (voicedMs < VOICE_ACTIVITY_CONFIG.minSpeechMs) {
-        discardRecording();
+    (audio: Float32Array) => {
+      if (audio.length === 0) return;
+      // The VAD is paused while a turn runs, so a segment that arrives here
+      // belongs to an idle orb. The busy check is a backstop against a segment
+      // completing in the same tick a turn starts — sending it would abort
+      // the turn already in flight.
+      if (
+        aiState === "thinking" ||
+        aiState === "searching" ||
+        aiState === "speaking"
+      ) {
         return;
       }
 
-      stopRecording();
+      // Silero emits 16 kHz mono; encode it as WAV for the existing pipeline.
+      // The turn still decodes + resamples (a no-op here) and drops the audio
+      // afterwards — only text is kept.
+      const blob = new Blob([encodeWav([audio], 16_000)], {
+        type: "audio/wav",
+      });
+      void respondWithMedia(blob, history);
     },
-    [discardRecording, stopRecording],
+    [aiState, history, respondWithMedia],
   );
 
-  useEffect(() => {
-    if (!vadActive || !preRollReady || recording !== "idle") return;
-    if (!startRecording()) return;
-
-    speechStartedRef.current = false;
-    clearPreRollTimer();
-    preRollTimerRef.current = setTimeout(() => {
-      preRollTimerRef.current = null;
-
-      // No VAD start within the window: drop the idle warm-up and try again.
-      if (!speechStartedRef.current) discardRecording();
-    }, PRE_ROLL_LIMIT);
-  }, [
-    clearPreRollTimer,
-    discardRecording,
-    preRollReady,
-    recording,
-    startRecording,
-    vadActive,
-  ]);
-
-  useVoiceActivity({
+  const {
+    status: sileroStatus,
+    userSpeaking,
+    vadError,
+  } = useSileroVad({
+    micLive: live,
     active: vadActive,
-    activityRef,
+    getStream,
     onSpeechStart: handleSpeechStart,
     onSpeechEnd: handleSpeechEnd,
-    armDelayMs: aiReply ? POST_REPLY_ARM_DELAY : undefined,
+    // Resume only after the speaker tail has cleared, so Atlas's own voice
+    // cannot open a turn.
+    armDelayMs: aiReply ? POST_REPLY_ARM_DELAY : 300,
   });
 
-  const startConversation = () => {
+  // A VAD failure (model load, lost track) is surfaced like a turn error.
+  const vadFailedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!vadError || vadFailedRef.current === vadError) return;
+    vadFailedRef.current = vadError;
+    failTurn(vadError);
+  }, [failTurn, vadError]);
+
+  const startConversation = useCallback(() => {
     setPreview("auto");
     stopTurn();
     primePlayback();
-    clearClip();
     toggle();
-  };
+  }, [primePlayback, stopTurn, toggle]);
 
-  const endConversation = () => {
+  const endConversation = useCallback(() => {
     stopTurn();
-    clearClip();
     disableCamera();
+    mediaStashRef.current = null;
     toggle();
-  };
+  }, [disableCamera, stopTurn, toggle]);
 
-  const handleMain = () => {
+  const handleMain = useCallback(() => {
     if (unavailable) return;
-
-    if (typeof MediaRecorder === "undefined") {
-      failTurn("Recording isn’t available in this browser.");
-      return;
-    }
 
     if (live || status === "starting" || status === "waiting") {
       endConversation();
@@ -457,7 +452,7 @@ export function DashboardFlow() {
     }
 
     startConversation();
-  };
+  }, [endConversation, live, startConversation, status, unavailable]);
 
   const handleOrbTap = useCallback(() => {
     // A tap stops what is happening, or starts a conversation when idle.
@@ -483,8 +478,8 @@ export function DashboardFlow() {
       }
 
       disableCamera();
+      mediaStashRef.current = null;
       stopTurn();
-      clearClip();
     }
 
     setPreview(next);
@@ -502,9 +497,9 @@ export function DashboardFlow() {
 
   const sendFromCard = useCallback(
     (text: string) => {
-      void sendText(text);
+      void sendTextWithMedia(text);
     },
-    [sendText],
+    [sendTextWithMedia],
   );
 
   const interactions = useMemo(
@@ -578,7 +573,14 @@ export function DashboardFlow() {
             ? "Searching the web…"
             : aiState === "error"
               ? (aiError ?? "Couldn’t answer that — try again.")
-              : (aiReply ?? (live ? "Listening…" : null))}
+              : (aiReply ??
+                (userSpeaking
+                  ? "Hearing you…"
+                  : live
+                    ? sileroStatus === "loading"
+                      ? "Loading voice detection…"
+                      : "Listening…"
+                    : null))}
       </p>
       {preview === "progressing" ? (
         <label className="mt-4 flex w-full max-w-xs items-center gap-3 font-mono text-xs text-ink-muted">
@@ -610,7 +612,7 @@ export function DashboardFlow() {
     </div>
   );
 
-  const card = (entry: (typeof cards)[number]) => (
+  const card = (entry: (typeof normalCards)[number]) => (
     <AdaptiveCard
       key={entry.id}
       card={entry}
@@ -623,6 +625,10 @@ export function DashboardFlow() {
     />
   );
 
+  const sidebar = (entry: (typeof sidebars)[number]) => (
+    <SidebarPanel key={entry.id} card={entry} className="flex-none" />
+  );
+
   return (
     <CardInteractionsProvider value={interactions}>
       <div className={`flex w-full flex-col items-center justify-center min-h-full ${showCards ? "max-w-[90rem]" : "max-w-md"}`}>
@@ -630,7 +636,18 @@ export function DashboardFlow() {
         {showCards ? (
           <div className="w-full">
             {wide ? (
-              <div className="grid w-full grid-cols-[minmax(260px,340px)_auto_minmax(260px,340px)] items-center gap-4 py-1 lg:gap-6">
+              <div
+                className={
+                  sidebars.length > 0
+                    ? "grid w-full grid-cols-[minmax(220px,300px)_minmax(260px,340px)_auto_minmax(260px,340px)] items-center gap-4 py-1 lg:gap-6"
+                    : "grid w-full grid-cols-[minmax(260px,340px)_auto_minmax(260px,340px)] items-center gap-4 py-1 lg:gap-6"
+                }
+              >
+                {sidebars.length > 0 ? (
+                  <div className="flex flex-col gap-3 self-start">
+                    {sidebars.map(sidebar)}
+                  </div>
+                ) : null}
                 <div className="flex flex-col gap-3">
                   {leftCards.map(card)}
                 </div>
@@ -648,8 +665,13 @@ export function DashboardFlow() {
                   {orbSlot}
                   {captionSlot}
                 </div>
+                {sidebars.length > 0 ? (
+                  <div className="flex w-full max-w-xl flex-col gap-3">
+                    {sidebars.map(sidebar)}
+                  </div>
+                ) : null}
                 <div className="flex max-h-[min(46vh,420px)] w-full max-w-xl flex-col gap-3 overflow-y-auto overflow-x-hidden px-1 [scrollbar-gutter:stable]">
-                  {cards.map(card)}
+                  {[...leftCards, ...rightCards].map(card)}
                 </div>
               </div>
             )}
@@ -686,7 +708,8 @@ export function DashboardFlow() {
           </div>
           {signStatus === "live" && !busy ? (
             <p className="text-center font-mono text-[11px] text-ink-muted">
-              Tap Sign, sign in ASL, then tap again to send.
+              Tap Sign, sign in ASL, then tap again to send. Keep both hands
+              in frame with good light.
             </p>
           ) : null}
           {signStatus === "error" && signError ? (
@@ -701,17 +724,7 @@ export function DashboardFlow() {
           ) : null}
         </div>
 
-        {aiAudio ? (
-          <audio
-            ref={audioRef}
-            src={aiAudio}
-            onEnded={onAudioEnded}
-            onError={onAudioFailed}
-            className="hidden"
-          />
-        ) : null}
-
-        <PromptDock onSendText={sendText} />
+        <Chatbox onSendText={sendTextWithMedia} />
 
         <TurnDebugPanel
           open={debugOpen}

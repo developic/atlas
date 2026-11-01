@@ -36,14 +36,8 @@ export function isToolTrace(value: unknown): value is ToolTrace {
   );
 }
 
-/**
- * Build a trace from a stream event, ignoring a tool this UI does not know.
- * Returns null so a future server tool cannot break an older client.
- */
-export function toToolTrace(
-  tool: string,
-  detail?: string,
-): ToolTrace | null {
+/** Build a trace from a stream event. Unknown tools are dropped. */
+export function toToolTrace(tool: string, detail?: string): ToolTrace | null {
   if (!(TOOL_TRACE_NAMES as readonly string[]).includes(tool)) return null;
 
   const clean = detail?.trim();

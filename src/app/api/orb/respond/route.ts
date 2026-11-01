@@ -1,21 +1,22 @@
 import {
-  CARTESIA_STREAM_SAMPLE_RATE,
-  isCartesiaPace,
-  isCartesiaVoiceId,
-  type CartesiaPace,
-  type CartesiaVoiceId,
-} from "@/lib/cartesia";
+  DEEPGRAM_STREAM_SAMPLE_RATE,
+  isDeepgramPace,
+  isDeepgramVoiceId,
+  type DeepgramPace,
+  type DeepgramVoiceId,
+} from "@/lib/deepgram";
 import {
-  synthesizeSpeech,
   synthesizeSpeechStream,
-} from "@/lib/cartesia-server";
+} from "@/lib/deepgram-server";
 import { parseHistory, type ChatMessage } from "@/lib/chat-message";
+import { parseProfile, type UserProfile } from "@/lib/onboarding";
 import {
   normalizeSession,
   respondToAudio,
   respondToText,
   type OmniTurn,
 } from "@/lib/model";
+import { parseSignFrames } from "@/lib/sign-frames";
 import { isOrbError, OrbError, userMessageFor } from "@/lib/orb-errors";
 import { MAX_TRANSCRIPT_CHARS, normalizeSpeech } from "@/lib/orb-turn";
 import { createSentenceChunker } from "@/lib/sentence-chunker";
@@ -27,9 +28,13 @@ type TurnInput = {
   audio: Buffer | null;
   mimeType: string;
   transcript: string;
+  /** Stills from the conversation's most recent media, for one turn only. */
+  mediaFrames: string[];
   history: ChatMessage[];
-  voice?: CartesiaVoiceId;
-  pace?: CartesiaPace;
+  voice?: DeepgramVoiceId;
+  pace?: DeepgramPace;
+  /** Who Atlas is talking to, from `/start`; remembered via the prompt. */
+  profile?: UserProfile;
   /** Stable per-conversation id; routes turns to one replica for prompt caching. */
   session?: string;
   /** Ask the server to attach raw provider payloads (development only). */
@@ -42,12 +47,12 @@ type TurnInput = {
  * The response is NDJSON so the orb can switch states before the slow work
  * finishes:
  *   {"status":"transcript","transcript":"…"}
- *   {"status":"searching","query":"…"}      // or {"status":"tool","tool":"…","detail":"…"}
+ *   {"status":"tool","tool":"…","detail":"…"}  // websearch, webfetch, …
  *   {"status":"speak-delta","text":"…"}    // only after the turn passed integrity validation
  *   {"status":"audio","pcm":"…","sampleRate":24000,"seq":0}
  *   {"status":"speaking","transcript":"…","speak":"…","cards":[…],"sources":[…]}
- *   {"status":"audio-done"}                 // PCM path
- *   {"status":"audio-mp3","audio":"data:…"}  // MP3 fallback
+ *   {"status":"audio-done"}                 // always; the client falls back
+ *                                          // to the browser voice when no PCM arrived
  *   {"status":"error","code":"…","message":"…"} on failure
  *
  * Earlier turns arrive as text (`history`), never audio: the client keeps the
@@ -119,15 +124,15 @@ export async function POST(request: Request) {
                 send({
                   status: "audio",
                   pcm: Buffer.from(pcm).toString("base64"),
-                  sampleRate: CARTESIA_STREAM_SAMPLE_RATE,
+                  sampleRate: DEEPGRAM_STREAM_SAMPLE_RATE,
                   seq: sequence,
                 });
                 sequence += 1;
               }
             } catch (error) {
-              // Try the whole-reply MP3 fallback at the end if nothing played.
-              // Logged here because the fallback hides the cause: without
-              // this the wire shows only a slow audio-mp3 with no reason.
+              // Stop queueing further sentences: the client falls back to the
+              // browser voice on audio-done, so more failed requests only add
+              // latency. Logged here because the fallback hides the cause.
               ttsFailure = error;
               console.error(
                 JSON.stringify({
@@ -143,18 +148,11 @@ export async function POST(request: Request) {
 
         const callbacks = {
           onTool: (tool: string, detail?: string) => {
-            if (tool === "websearch") {
-              send({
-                status: "searching",
-                ...(detail ? { query: detail } : {}),
-              });
-            } else {
-              send({
-                status: "tool",
-                tool,
-                ...(detail ? { detail } : {}),
-              });
-            }
+            send({
+              status: "tool",
+              tool,
+              ...(detail ? { detail } : {}),
+            });
           },
           onTranscript: (text: string) => {
             send({ status: "transcript", transcript: text });
@@ -173,19 +171,23 @@ export async function POST(request: Request) {
 
         stage = "omni";
         const debug = input.debug && turnDebugEnabled();
+        const media =
+          input.mediaFrames.length > 0
+            ? { mediaFrames: input.mediaFrames }
+            : {};
         turn = input.audio
           ? await respondToAudio(
               input.audio,
               input.mimeType,
               input.history,
               callbacks,
-              { signal: clientSignal, session: input.session, debug },
+              { signal: clientSignal, session: input.session, debug, profile: input.profile, ...media },
             )
           : await respondToText(
               input.transcript,
               input.history,
               callbacks,
-              { signal: clientSignal, session: input.session, debug },
+              { signal: clientSignal, session: input.session, debug, profile: input.profile, ...media },
             );
 
         if (!turn.speak) {
@@ -194,7 +196,6 @@ export async function POST(request: Request) {
 
         stage = "speak";
 
-        const spoken = normalizeSpeech(turn.speak);
         const final: TurnEvent = {
           status: "speaking",
           transcript: turn.transcript || input.transcript,
@@ -215,19 +216,10 @@ export async function POST(request: Request) {
 
         await audioChain;
 
-        if (pcmSent) {
+        // Always close the audio sequence. When no PCM arrived the client
+        // speaks the reply with the browser voice instead of an MP3 download.
+        if (!clientSignal.aborted) {
           send({ status: "audio-done" });
-        } else if (clientSignal.aborted) {
-          // The client is gone; do not spend a Cartesia request on silence.
-        } else {
-          // The SSE path failed before any audio reached the client. The MP3
-          // endpoint keeps the turn working with the original playback path.
-          const mp3 = await synthesizeSpeech(spoken, preferences);
-
-          send({
-            status: "audio-mp3",
-            audio: `data:audio/mpeg;base64,${Buffer.from(mp3).toString("base64")}`,
-          });
         }
 
         console.info(
@@ -244,7 +236,7 @@ export async function POST(request: Request) {
             completionTokens: turn.meta.completionTokens,
             reasoningTokens: turn.meta.reasoningTokens,
             toolRounds: turn.meta.toolRounds,
-            audio: pcmSent ? "pcm" : "mp3",
+            audio: pcmSent ? "pcm" : "browser",
           }),
         );
       } catch (error) {
@@ -309,9 +301,11 @@ async function readRequest(request: Request): Promise<TurnInput> {
   if (contentType.includes("application/json")) {
     const body = (await request.json()) as {
       transcript?: unknown;
+      mediaFrames?: unknown;
       history?: unknown;
       voice?: unknown;
       pace?: unknown;
+      profile?: unknown;
       session?: unknown;
       debug?: unknown;
     };
@@ -323,9 +317,11 @@ async function readRequest(request: Request): Promise<TurnInput> {
         typeof body.transcript === "string"
           ? body.transcript.trim().slice(0, MAX_TRANSCRIPT_CHARS)
           : "",
+      mediaFrames: parseSignFrames(body.mediaFrames),
       history: parseHistory(body.history),
-      voice: isCartesiaVoiceId(body.voice) ? body.voice : undefined,
-      pace: isCartesiaPace(body.pace) ? body.pace : undefined,
+      voice: isDeepgramVoiceId(body.voice) ? body.voice : undefined,
+      pace: isDeepgramPace(body.pace) ? body.pace : undefined,
+      profile: parseProfile(body.profile),
       session: readSession(body.session),
       debug: body.debug === true,
     };
@@ -337,11 +333,13 @@ async function readRequest(request: Request): Promise<TurnInput> {
   const voice = form.get("voice");
   const pace = form.get("pace");
   const transcript = form.get("transcript");
+  const mediaFrames = parseSignFrames(form.getAll("mediaFrame"));
   const session = readSession(form.get("session"));
   const debug = form.get("debug") === "1";
+  const profile = parseProfile(safeJson(form.get("profile")));
   const preferences = {
-    voice: isCartesiaVoiceId(voice) ? voice : undefined,
-    pace: isCartesiaPace(pace) ? pace : undefined,
+    voice: isDeepgramVoiceId(voice) ? voice : undefined,
+    pace: isDeepgramPace(pace) ? pace : undefined,
   };
 
   if (!(file instanceof File) || file.size === 0) {
@@ -352,9 +350,11 @@ async function readRequest(request: Request): Promise<TurnInput> {
         typeof transcript === "string"
           ? transcript.trim().slice(0, MAX_TRANSCRIPT_CHARS)
           : "",
+      mediaFrames,
       history,
       session,
       debug,
+      profile,
       ...preferences,
     };
   }
@@ -367,9 +367,11 @@ async function readRequest(request: Request): Promise<TurnInput> {
     audio: Buffer.from(await file.arrayBuffer()),
     mimeType: file.type,
     transcript: "",
+    mediaFrames,
     history,
     session,
     debug,
+    profile,
     ...preferences,
   };
 }
@@ -381,6 +383,17 @@ async function readRequest(request: Request): Promise<TurnInput> {
  */
 function readSession(value: unknown): string | undefined {
   return normalizeSession(typeof value === "string" ? value : undefined);
+}
+
+/** Parse an optional JSON form field without failing the turn on bad input. */
+function safeJson(value: unknown): unknown {
+  if (typeof value !== "string" || !value) return undefined;
+
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

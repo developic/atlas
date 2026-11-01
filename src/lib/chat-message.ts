@@ -1,7 +1,7 @@
 /**
  * Shared text-only conversation contract.
  *
- * The dashboard validates its `sessionStorage` session with this, and the orb
+ * The dashboard validates its `localStorage` history with this, and the orb
  * route validates the `history` field with the same helper. Keeping one copy
  * means the client and server cannot drift on what a stored turn looks like.
  */
@@ -27,15 +27,20 @@ export type ChatMessage = {
 /**
  * One per-message cap for both the stored session and the request body.
  *
- * The dashboard and the route used to keep separate limits (6,000 and 4,000),
- * so a long turn could be stored at one size and read back at another.
+ * Big enough that legit cards never clip, small enough that one giant paste
+ * cannot evict the rest of the session from the token budget below.
  */
-export const MAX_MESSAGE_CHARS = 6_000;
+export const MAX_MESSAGE_CHARS = 50_000;
 
 /** What the model receives: text only, never ids, timestamps, or sources. */
 export type ModelHistoryMessage = Pick<ChatMessage, "role" | "content" | "speak">;
 
-const DEFAULT_HISTORY_CHARS = 6_000;
+const DEFAULT_HISTORY_TOKENS = 100_000;
+
+/** Rough token estimate for budgeting; the provider counts exactly. */
+export function estimateTokens(chars: number): number {
+  return Math.ceil(chars / 4);
+}
 
 function isSourceLink(value: unknown): value is SourceLink {
   if (typeof value !== "object" || value === null) return false;
@@ -101,7 +106,7 @@ function messageSize(message: ChatMessage) {
 }
 
 /**
- * Keep the newest turns within a character budget, without separating a user
+ * Keep the newest turns within a token budget, without separating a user
  * message from the assistant reply it belongs to.
  *
  * The oldest pair is dropped whole. If a single pair is larger than the budget,
@@ -110,7 +115,7 @@ function messageSize(message: ChatMessage) {
  */
 export function trimHistory(
   messages: ChatMessage[],
-  maxChars = DEFAULT_HISTORY_CHARS,
+  maxTokens = DEFAULT_HISTORY_TOKENS,
 ): ChatMessage[] {
   const pairs: ChatMessage[][] = [];
 
@@ -129,16 +134,17 @@ export function trimHistory(
 
   const kept: ChatMessage[][] = [];
 
-  let total = 0;
+  let totalTokens = 0;
 
   for (let index = pairs.length - 1; index >= 0; index -= 1) {
     const pair = pairs[index];
     const size = pair.reduce((sum, message) => sum + messageSize(message), 0);
+    const tokens = estimateTokens(size);
 
-    if (kept.length > 0 && total + size > maxChars) break;
+    if (kept.length > 0 && totalTokens + tokens > maxTokens) break;
 
-    if (kept.length === 0 && size > maxChars) {
-      const share = Math.max(1, Math.floor(maxChars / pair.length));
+    if (kept.length === 0 && tokens > maxTokens) {
+      const share = Math.max(1, Math.floor((maxTokens * 4) / pair.length));
 
       kept.unshift(
         pair.map((message) => ({
@@ -153,7 +159,7 @@ export function trimHistory(
       kept.unshift(pair);
     }
 
-    total += size;
+    totalTokens += tokens;
   }
 
   return kept.flat();
@@ -163,11 +169,11 @@ export function trimHistory(
  * Validate the `history` field (a JSON string or an array) into model turns.
  *
  * Invalid turns are dropped, `content` and `speak` share one cap, empty turns
- * are removed, and the newest pairs are kept within the character budget.
+ * are removed, and the newest pairs are kept within the token budget.
  */
 export function parseHistory(
   value: unknown,
-  maxChars = DEFAULT_HISTORY_CHARS,
+  maxTokens = DEFAULT_HISTORY_TOKENS,
 ): ChatMessage[] {
   let parsed: unknown = value;
 
@@ -192,7 +198,7 @@ export function parseHistory(
     }))
     .filter((message) => message.content.length > 0);
 
-  return trimHistory(messages, maxChars);
+  return trimHistory(messages, maxTokens);
 }
 
 /** Drop the session-only fields before a turn sends its history. */

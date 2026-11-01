@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import type { Dispatch, RefObject, SetStateAction } from "react";
+import type { Dispatch, SetStateAction } from "react";
 
 import { shouldRevealTurn, type RevealTrigger } from "@/components/dashboard/orb-reveal";
 import { usePcmPlayer } from "@/components/dashboard/use-pcm-player";
@@ -11,7 +11,7 @@ import {
   trimHistory,
   type ChatMessage,
 } from "@/lib/chat-message";
-import { loadOnboarding } from "@/lib/onboarding";
+import { loadOnboarding, parseProfile } from "@/lib/onboarding";
 import { toToolTrace, type ToolTrace } from "@/lib/tool-trace";
 import {
   MAX_WIRE_FRAMES,
@@ -28,11 +28,11 @@ import { clipToWav } from "@/lib/wav";
 
 export type AiState = "idle" | "thinking" | "searching" | "speaking" | "error";
 
-/** How many turns the panel and session storage keep. */
-export const MAX_SESSION_MESSAGES = 40;
+/** How many turns the panel and session storage keep (storage quota backstop). */
+export const MAX_SESSION_MESSAGES = 500;
 
-/** The model gets a character-trimmed slice of the session. */
-const MAX_HISTORY_CHARS = 6_000;
+/** The model gets a token-budgeted slice of the session (~10% of its window). */
+const MAX_HISTORY_TOKENS = 100_000;
 /** The free omni worker is shared; retry a busy turn before showing an error. */
 const BUSY_RETRY_MS = 1_500;
 const MAX_BUSY_RETRIES = 2;
@@ -51,7 +51,7 @@ const REQUEST_TURN_DEBUG = process.env.NODE_ENV !== "production";
  * to the same replica, so the system prompt and the growing history stay in
  * that replica's prompt cache and bill at the cached input rate.
  */
-const SESSION_KEY = "atlas.orb.session";
+const SESSION_KEY = "session";
 
 function sessionId(): string | undefined {
   try {
@@ -85,8 +85,6 @@ type RunTurnOptions = {
 type UseOrbTurnOptions = {
   history: ChatMessage[];
   setHistory: Dispatch<SetStateAction<ChatMessage[]>>;
-  /** The hidden MP3 fallback element, so a stop can pause it. */
-  audioRef?: RefObject<HTMLAudioElement | null>;
 };
 
 function wait(ms: number) {
@@ -125,7 +123,6 @@ function turnErrorMessage(error: unknown) {
 export function useOrbTurn({
   history,
   setHistory,
-  audioRef,
 }: UseOrbTurnOptions) {
   const abortRef = useRef<AbortController | null>(null);
   const streamedUserRef = useRef<string | null>(null);
@@ -133,12 +130,15 @@ export function useOrbTurn({
   const finalTurnRef = useRef<SpeakingEvent | null>(null);
   const revealedRef = useRef(false);
   const audioDoneRef = useRef(false);
+  /** Any server PCM arrived this turn; without it the browser speaks. */
+  const receivedPcmRef = useRef(false);
+  /** Guards late `speechSynthesis` events after a stop or a newer turn. */
+  const browserTokenRef = useRef(0);
   /** Tool rows already announced during this turn, newest last. */
   const toolsRef = useRef<ToolTrace[]>([]);
   const [aiState, setAiState] = useState<AiState>("idle");
   const [aiReply, setAiReply] = useState<string | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
-  const [aiAudio, setAiAudio] = useState<string | null>(null);
   const [aiTool, setAiTool] = useState<ToolTrace | null>(null);
   /**
    * The last turn's wire tap for the debug panel. It is intentionally separate
@@ -160,7 +160,6 @@ export function useOrbTurn({
   } = usePcmPlayer({
     onDrained: useCallback(() => {
       setAiState("idle");
-      setAiAudio(null);
     }, []),
   });
 
@@ -225,6 +224,51 @@ export function useOrbTurn({
     [setHistory],
   );
 
+  /** Stop the browser voice, if it is the one talking. */
+  const cancelBrowserSpeech = useCallback(() => {
+    browserTokenRef.current += 1;
+
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+  }, []);
+
+  /**
+   * Say the reply with the browser's own voice. This is the fallback when the
+   * server produced no audio: simple, no download, no MP3 file.
+   */
+  const speakWithBrowser = useCallback((text: string) => {
+    const clean = text.trim();
+
+    if (!clean) {
+      setAiState("idle");
+      return;
+    }
+
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      setAiError("Voice playback isn't available in this browser.");
+      setAiState("error");
+      return;
+    }
+
+    browserTokenRef.current += 1;
+    const token = browserTokenRef.current;
+    const utterance = new SpeechSynthesisUtterance(clean);
+
+    utterance.onend = () => {
+      if (browserTokenRef.current !== token) return;
+      setAiState("idle");
+    };
+    utterance.onerror = () => {
+      if (browserTokenRef.current !== token) return;
+      setAiError("I couldn't play the voice reply.");
+      setAiState("error");
+    };
+
+    setAiState("speaking");
+    window.speechSynthesis.speak(utterance);
+  }, []);
+
   /** The single reset every turn and every cancel uses. */
   const resetTurn = useCallback(
     (state: AiState = "idle") => {
@@ -232,16 +276,17 @@ export function useOrbTurn({
       finalTurnRef.current = null;
       revealedRef.current = false;
       audioDoneRef.current = false;
+      receivedPcmRef.current = false;
       streamedUserRef.current = null;
       toolsRef.current = [];
+      cancelBrowserSpeech();
       stopPlayback();
       setAiState(state);
       setAiReply(null);
       setAiError(null);
-      setAiAudio(null);
       setAiTool(null);
     },
-    [stopPlayback],
+    [cancelBrowserSpeech, stopPlayback],
   );
 
   const revealTurn = useCallback(
@@ -306,9 +351,7 @@ export function useOrbTurn({
       const audio = {
         ...wireAudioRef.current,
         done:
-          wireAudioRef.current.done ||
-          event.status === "audio-done" ||
-          event.status === "audio-mp3",
+          wireAudioRef.current.done || event.status === "audio-done",
       };
 
       return {
@@ -376,14 +419,13 @@ export function useOrbTurn({
       // Debug tap: runs before the reader dispatches, and before an error
       // frame throws, so the panel sees the full wire.
       onEvent: (event: TurnEvent) => recordWireEvent(event),
-      // Keep the older `searching` frame working too; the route now sends the
-      // same tool event with the query attached.
-      onSearching: (query?: string) => noteTool("websearch", query),
       onTool: (tool: string, detail?: string) => noteTool(tool, detail),
       onTranscript: (text: string) => {
         if (echoTranscript) upsertUser(text);
       },
       onAudio: (pcm: string, sampleRate: number) => {
+        receivedPcmRef.current = true;
+
         if (revealedRef.current) {
           setAiState("speaking");
           enqueuePcm(pcm, sampleRate);
@@ -398,14 +440,19 @@ export function useOrbTurn({
       onAudioDone: () => {
         audioDoneRef.current = true;
 
-        // The route sends audio-done after the PCM chunks; if the reveal has
-        // not happened yet, markPlaybackDone runs when they are flushed.
-        if (revealedRef.current) markPlaybackDone();
-      },
-      onAudioMp3: (audio: string) => {
-        revealPendingTurn("mp3");
-        setAiAudio(audio);
-        setAiState("speaking");
+        if (revealedRef.current) {
+          markPlaybackDone();
+          return;
+        }
+
+        // The route sends audio-done after the PCM chunks; when none arrived
+        // the server produced no audio, so reveal the text and let the
+        // browser say it instead of playing an MP3 download.
+        const turn = finalTurnRef.current;
+
+        if (turn && !receivedPcmRef.current && revealPendingTurn("browser")) {
+          speakWithBrowser(turn.speak);
+        }
       },
       onSpeaking: (event: SpeakingEvent) => {
         finalTurnRef.current = event;
@@ -424,6 +471,7 @@ export function useOrbTurn({
       noteTool,
       recordWireEvent,
       revealPendingTurn,
+      speakWithBrowser,
       upsertUser,
     ],
   );
@@ -545,7 +593,11 @@ export function useOrbTurn({
   );
 
   const respond = useCallback(
-    async (blob: Blob, session: ChatMessage[]) => {
+    async (
+      blob: Blob,
+      session: ChatMessage[],
+      opts: { mediaFrames?: string[] } = {},
+    ) => {
       await runTurn({
         echoTranscript: true,
         buildBody: async () => {
@@ -568,7 +620,7 @@ export function useOrbTurn({
           form.append(
             "history",
             JSON.stringify(
-              toModelHistory(trimHistory(session, MAX_HISTORY_CHARS)),
+              toModelHistory(trimHistory(session, MAX_HISTORY_TOKENS)),
             ),
           );
 
@@ -576,9 +628,16 @@ export function useOrbTurn({
           if (saved?.voiceId) form.append("voice", saved.voiceId);
           if (saved?.pace) form.append("pace", saved.pace);
 
+          const profile = parseProfile(saved);
+          if (profile) form.append("profile", JSON.stringify(profile));
+
           const affinity = sessionId();
           if (affinity) form.append("session", affinity);
           if (REQUEST_TURN_DEBUG) form.append("debug", "1");
+
+          for (const frame of opts.mediaFrames ?? []) {
+            form.append("mediaFrame", frame);
+          }
 
           return { body: form };
         },
@@ -588,7 +647,7 @@ export function useOrbTurn({
   );
 
   const sendText = useCallback(
-    async (text: string) => {
+    async (text: string, opts: { mediaFrames?: string[] } = {}) => {
       const clean = text.trim();
       if (!clean) return;
 
@@ -615,16 +674,21 @@ export function useOrbTurn({
         },
         buildBody: () => {
           const saved = loadOnboarding();
+          const profile = parseProfile(saved);
 
           return {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               transcript: clean,
+              ...(opts.mediaFrames?.length
+                ? { mediaFrames: opts.mediaFrames }
+                : {}),
               history: toModelHistory(
-                trimHistory(history, MAX_HISTORY_CHARS),
+                trimHistory(history, MAX_HISTORY_TOKENS),
               ),
               voice: saved?.voiceId ?? undefined,
               pace: saved?.pace ?? undefined,
+              ...(profile ? { profile } : {}),
               session: sessionId(),
               ...(REQUEST_TURN_DEBUG ? { debug: true } : {}),
             }),
@@ -639,19 +703,9 @@ export function useOrbTurn({
   const stopTurn = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
-    audioRef?.current?.pause();
+    cancelBrowserSpeech();
     resetTurn("idle");
-  }, [audioRef, resetTurn]);
-
-  const onAudioEnded = useCallback(() => {
-    setAiState("idle");
-    setAiAudio(null);
-  }, []);
-
-  const onAudioFailed = useCallback(() => {
-    setAiState("error");
-    setAiAudio(null);
-  }, []);
+  }, [cancelBrowserSpeech, resetTurn]);
 
   /** Clear a previous error as a new utterance starts. */
   const dismissError = useCallback(() => {
@@ -659,7 +713,7 @@ export function useOrbTurn({
     setAiState("idle");
   }, []);
 
-  /** A local failure outside a turn, such as no MediaRecorder support. */
+  /** A local failure outside a turn, such as an unavailable voice pipeline. */
   const failTurn = useCallback((message: string) => {
     setAiError(message);
     setAiState("error");
@@ -672,15 +726,12 @@ export function useOrbTurn({
     aiState,
     aiReply,
     aiError,
-    aiAudio,
     aiTool,
     respond,
     sendText,
     resetTurn,
     stopTurn,
     primePlayback,
-    onAudioEnded,
-    onAudioFailed,
     dismissError,
     failTurn,
     wire,

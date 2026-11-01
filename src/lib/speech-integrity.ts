@@ -1,21 +1,12 @@
 /**
  * The final-response integrity gate for speech.
  *
- * The primary mechanism is structural: every utterance that reports on an
- * action this turn must cite ledger execution ids that were actually
- * delivered to the model, and a failed execution can never back a success
- * claim. Tool-call JSON arriving as text is rejected outright — it is never
- * converted into tool calls and never spoken.
- *
- * A small, tightly scoped pattern list (`ACTION_CLAIM_PATTERNS`) is a
- * supplementary backstop only: it catches claims about actions that no
- * execution exists for (plain-text fabrication) and success-claims pinned to
- * failed executions. It is deliberately not the primary integrity mechanism.
+ * Three text-only checks, no execution ids involved: tool-call JSON arriving
+ * as text is rejected outright, Markdown or code formatting is withheld
+ * (TTS reads it literally), and a claim that an action ran when none did is
+ * fabrication. Everything here is phrased as a model-readable reason so the
+ * turn can repair instead of silently speaking a bad utterance.
  */
-import type { ExecutionLedger, ExecutionRecord } from "./execution-ledger";
-
-/** Highest number of citations per utterance. */
-export const MAX_EVIDENCE = 8;
 
 /**
  * Markdown and code formatting that must never be spoken raw. TTS reads
@@ -61,22 +52,17 @@ function looksLikeToolCallJson(text: string): boolean {
 
 export type ClaimVerdict = { ok: true } | { ok: false; reason: string };
 
-type SpeechClaim = {
-  text: string;
-  evidence: readonly string[];
-  ledger: ExecutionLedger;
-};
-
 /**
- * Validate one utterance against the execution ledger. Returns a
- * model-readable reason on failure so the turn can repair instead of silently
- * buying a claim.
+ * Validate one utterance. Returns a model-readable reason on failure so the
+ * turn can repair instead of silently speaking it.
  */
 export function validateSpeechClaim({
   text,
-  evidence,
-  ledger,
-}: SpeechClaim): ClaimVerdict {
+  actionsRan,
+}: {
+  text: string;
+  actionsRan: boolean;
+}): ClaimVerdict {
   if (looksLikeToolCallJson(text)) {
     return {
       ok: false,
@@ -93,77 +79,7 @@ export function validateSpeechClaim({
     };
   }
 
-  // Rule A: every citation must be a real, delivered, settled action
-  // execution the model was actually shown.
-  for (const id of evidence) {
-    const record = ledger.get(id);
-
-    if (!record) {
-      return {
-        ok: false,
-        reason: `cited ${JSON.stringify(id)} but no such execution exists this turn (run: ${ledger.describe()})`,
-      };
-    }
-
-    if (record.tool === "speak") {
-      return {
-        ok: false,
-        reason: `cited ${id} but that was a speak call, not an action execution`,
-      };
-    }
-
-    if (!ledger.isDelivered(id)) {
-      return {
-        ok: false,
-        reason: `cited ${id} but its result has not been delivered to you yet; wait for the result, then speak again citing it`,
-      };
-    }
-
-    if (record.state === "running") {
-      return {
-        ok: false,
-        reason: `cited ${id} but that execution is still running`,
-      };
-    }
-  }
-
-  const citations = [...new Set(evidence)];
-  const citedRecords: ExecutionRecord[] = citations
-    .map((id) => ledger.get(id))
-    .filter((record): record is ExecutionRecord => record !== undefined);
-  const actionsRan = ledger.hasActionAttempts();
-
-  // Rule B: once an action ran this turn, every utterance must bind itself
-  // to at least one real execution. This is the structural gate that keeps
-  // unverified claims out of the final response.
-  if (actionsRan && citations.length === 0) {
-    return {
-      ok: false,
-      reason:
-        "actions ran this turn, so the utterance must cite the execution ids of whatever it reports on; pass `evidence` with the exec ids from the stamped tool results",
-    };
-  }
-
-  const successfulCitations = citedRecords.filter(
-    (record) => record.state === "succeeded",
-  );
-
-  // Rule C: a success claim pinned only to failed executions is fabrication.
-  if (
-    successfulCitations.length === 0 &&
-    citations.length > 0 &&
-    matchesActionClaim(text)
-  ) {
-    return {
-      ok: false,
-      reason:
-        "the executions you cited all failed, so they cannot show success; say plainly that the action failed while citing it, or cite the execution that succeeded",
-    };
-  }
-
-  // Rule D: turn with no action attempts — a claim that an action ran is
-  // always fabricated (the backstop for plain-text paths).
-  if (!actionsRan && citations.length === 0 && matchesActionClaim(text)) {
+  if (!actionsRan && matchesActionClaim(text)) {
     return {
       ok: false,
       reason:

@@ -9,7 +9,6 @@
 import { extractJsonValue } from "../json-extract";
 export {
   CITATION_INSTRUCTION,
-  EXECUTION_STAMP_HINT,
   ORB_TOOL_NAMES,
   type NativeCall,
   type OrbTool,
@@ -17,7 +16,6 @@ export {
   type ToolParse,
   type ToolParameter,
   type ToolRequest,
-  type ToolRunContext,
   type ToolOutcome,
   type ToolResult,
 } from "./types";
@@ -27,7 +25,6 @@ import {
   runCurrentTime,
 } from "./current-time";
 import {
-  collectEvidence,
   ORB_TOOL_NAMES,
   type NativeCall,
   type OrbTool,
@@ -35,7 +32,6 @@ import {
   type ToolParse,
   type ToolParameter,
   type ToolRequest,
-  type ToolRunContext,
   type ToolOutcome,
   type ToolResult,
 } from "./types";
@@ -107,6 +103,11 @@ function isNullable(parameter: ToolParameter): boolean {
  * Validate tool arguments against the tool's JSON Schema properties.
  * Returns missing required keys; callers collect the error.
  * Exported for tests; not part of the runtime contract beyond registry.ts.
+ *
+ * String parameters are trimmed and capped. Array-of-object parameters (the
+ * create cards array) are validated item by item against the item schema and
+ * stored as JSON, so the runner receives structured cards through the same
+ * string-only `ToolRequest.arguments` channel.
  */
 export function validateToolArgs(
   definition: OrbTool,
@@ -115,6 +116,7 @@ export function validateToolArgs(
 ): { args: Record<string, string>; missing: string[] } {
   const args: Record<string, string> = {};
   const missing: string[] = [];
+  const required = definition.function.parameters.required;
 
   for (const [key, parameter] of Object.entries(
     definition.function.parameters.properties,
@@ -123,9 +125,24 @@ export function validateToolArgs(
 
     if (typeof raw === "string" && raw.trim()) {
       args[key] = raw.trim().slice(0, argumentLimit(toolName, key));
-    } else if (isNullable(parameter)) {
+      continue;
+    }
+
+    if (isObjectArray(parameter)) {
+      const validated = validateObjectArray(key, parameter, raw);
+
+      if (validated.ok) {
+        if (validated.items !== null) args[key] = JSON.stringify(validated.items);
+      } else {
+        missing.push(validated.reason);
+      }
+
+      continue;
+    }
+
+    if (isNullable(parameter)) {
       // Allowed to be null or absent.
-    } else if (definition.function.parameters.required.includes(key)) {
+    } else if (required.includes(key)) {
       missing.push(key);
     }
   }
@@ -133,12 +150,85 @@ export function validateToolArgs(
   return { args, missing };
 }
 
+function isObjectArray(parameter: ToolParameter): parameter is Extract<
+  ToolParameter,
+  { items: { type: "object" } }
+> {
+  return (
+    Array.isArray(parameter.type) &&
+    (parameter.type as readonly string[]).includes("array") &&
+    typeof (parameter as { items?: unknown }).items === "object" &&
+    (parameter as { items?: { type?: unknown } }).items?.type === "object"
+  );
+}
+
+function validateObjectArray(
+  key: string,
+  parameter: Extract<ToolParameter, { items: { type: "object" } }>,
+  raw: unknown,
+): { ok: true; items: Record<string, string>[] | null } | { ok: false; reason: string } {
+  if (raw === undefined || raw === null) {
+    return { ok: true, items: null };
+  }
+
+  if (!Array.isArray(raw)) {
+    return { ok: false, reason: `${key} must be an array` };
+  }
+
+  if (raw.length === 0) {
+    return { ok: false, reason: key };
+  }
+
+  if (parameter.maxItems !== undefined && raw.length > parameter.maxItems) {
+    return {
+      ok: false,
+      reason: `${key} has ${raw.length} items; at most ${parameter.maxItems} are allowed`,
+    };
+  }
+
+  const items: Record<string, string>[] = [];
+
+  for (const [index, entry] of raw.entries()) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      return { ok: false, reason: `${key}[${index}] is not an object` };
+    }
+
+    const record = entry as Record<string, unknown>;
+    const item: Record<string, string> = {};
+
+    for (const [field, fieldDef] of Object.entries(parameter.items.properties)) {
+      const value = record[field];
+
+      if (typeof value === "string" && value.trim()) {
+        item[field] =
+          typeof fieldDef.maxLength === "number"
+            ? value.trim().slice(0, fieldDef.maxLength)
+            : value.trim();
+      } else if (
+        !isNullableField(fieldDef) &&
+        parameter.items.required.includes(field)
+      ) {
+        return { ok: false, reason: `${key}[${index}] is missing "${field}"` };
+      }
+    }
+
+    items.push(item);
+  }
+
+  return { ok: true, items };
+}
+
+/** A null-typed field may be null or omitted; the runner defaults it. */
+function isNullableField(field: { type: unknown }): boolean {
+  return Array.isArray(field.type);
+}
+
 /**
  * Classify one model reply before anything is executed.
  *
  * Accepts the canonical nested shape
- * `{"tool":"websearch","arguments":{"query":"…"}}` and the older flat shape,
- * where the parameters sit next to `tool` instead of inside `arguments`. A
+ * `{"tool":"websearch","arguments":{"query":"…"}}` as well as native calls,
+ * whose parameters sit flat next to `tool` instead of inside `arguments`. A
  * model that follows the JSON Schema must never be silently ignored, and a
  * broken tool request must not be mistaken for a final answer: both used to
  * fall through to `finalizeTurn`.
@@ -173,16 +263,6 @@ export function classifyToolOutput(value: unknown): ToolParse {
         ? (nested as Record<string, unknown>)
         : record;
 
-    // Evidence citations may sit beside `tool` (native calls are merged flat)
-    // or inside `arguments` (the schema's declared shape). The cap lives in
-    // one place: `collectEvidence`.
-    const evidence = collectEvidence(
-      record.evidence ??
-        (typeof nested === "object" && nested !== null && !Array.isArray(nested)
-          ? (nested as Record<string, unknown>).evidence
-          : undefined),
-    );
-
     const validated = validateToolArgs(definition, source, name);
 
     if (validated.missing.length > 0) {
@@ -197,7 +277,6 @@ export function classifyToolOutput(value: unknown): ToolParse {
     requests.push({
       tool: name,
       arguments: args,
-      evidence,
       transcript:
         typeof record.transcript === "string"
           ? record.transcript.trim().slice(0, MAX_TRANSCRIPT_ARG_CHARS)
@@ -302,13 +381,27 @@ export function parseNativeToolCalls(toolCalls: unknown): NativeCall[] {
  * prompt lists only names and argument shapes: repeating the descriptions here
  * doubled their cost and let the two copies drift.
  */
+/** One-line argument shape per tool, generated from the registry. */
+function argumentShape(key: string, parameter: ToolParameter, required: string[]): string {
+  const name =
+    required.includes(key) && !isNullable(parameter) ? key : `${key}?`;
+
+  if (!isObjectArray(parameter)) return name;
+
+  const fields = Object.entries(parameter.items.properties)
+    .map(([field, fieldDef]) =>
+      Array.isArray(fieldDef.type) ? `${field}?` : field,
+    )
+    .join(",");
+
+  return `${name}:[{${fields}}]`;
+}
+
 export function renderToolPrompt(): string {
   const lines = ORB_TOOLS.map((tool) => {
     const args = Object.entries(tool.function.parameters.properties)
       .map(([key, parameter]) =>
-        tool.function.parameters.required.includes(key) && !isNullable(parameter)
-          ? key
-          : `${key}?`,
+        argumentShape(key, parameter, tool.function.parameters.required),
       )
       .join(", ");
 
@@ -325,13 +418,13 @@ async function dispatchTool(
   name: string,
   args: Record<string, string>,
   signal?: AbortSignal,
-  context?: ToolRunContext,
+  actionsRan = false,
 ): Promise<import("./types").ToolOutcome> {
   if (name === "websearch") return runWebsearch(args, signal);
   if (name === "webfetch") return runWebfetch(args, signal);
   if (name === "get_current_time") return runCurrentTime(args);
   if (name === "create") return runCreate(args);
-  if (name === "speak") return runSpeak(args, context);
+  if (name === "speak") return runSpeak(args, actionsRan);
 
   return {
     ok: false,
@@ -340,30 +433,17 @@ async function dispatchTool(
 }
 
 /**
- * Run one tool and, when a ledger execution is attached, complete that
- * execution with its real outcome. The ledger's first-completion rule means a
- * repeated execution can never flip a failed run into a succeeded one.
- * Never throws: a failure is returned with Ok=false and model-readable text,
- * so one unavailable tool cannot kill the whole turn. The turn signal stops a
- * fetch or search when the client leaves.
+ * Run one tool. Never throws: a failure is returned with Ok=false and
+ * model-readable text, so one unavailable tool cannot kill the whole turn.
+ * The turn signal stops a fetch or search when the client leaves.
  */
 export async function executeTool(
   name: string,
   args: Record<string, string>,
   signal?: AbortSignal,
-  context?: ToolRunContext,
+  actionsRan = false,
 ): Promise<ToolOutcome> {
-  const outcome = await dispatchTool(name, args, signal, context);
-
-  if (context) {
-    context.ledger.complete(
-      context.record.id,
-      outcome.ok,
-      outcome.ok ? outcome.result.content : outcome.error,
-    );
-  }
-
-  return outcome;
+  return dispatchTool(name, args, signal, actionsRan);
 }
 
 /** The historical `ToolResult` wrapper: failures become readable content. */
@@ -371,9 +451,9 @@ export async function runToolWithSources(
   name: string,
   args: Record<string, string>,
   signal?: AbortSignal,
-  context?: ToolRunContext,
+  actionsRan = false,
 ): Promise<ToolResult> {
-  const outcome = await executeTool(name, args, signal, context);
+  const outcome = await executeTool(name, args, signal, actionsRan);
 
   return outcome.ok ? outcome.result : { content: outcome.error, sources: [] };
 }

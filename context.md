@@ -1,5 +1,19 @@
 # Project Context
 
+## 2026-11-01 21:30 IST (16:00 UTC) — Prompt fix: guide-promise without cards was a wording loophole, not a code hole
+
+- The coffee wire (speak-only "here's a complete beginner-friendly guide...", zero `create` calls, turn finalized) passed all three `validateSpeechClaim` rules: plain text, no Markdown, no ACTION_CLAIM match. Code-gate approach started then reverted per direction: prompt problem, not code problem.
+- Diagnosis from the full prompt text: `ATLAS_CARDS` rule 19 banned saying "a card, step, timer, or sidebar is on screen" — the model's "here's a complete guide" promised screen material without any banned noun, complying with the letter while violating the spirit. One-variable fix in `rules.ts`: the ban now covers paraphrases (guide/tutorial/walkthrough/steps with "here's"/"below"/"ready", plus step enumeration) until the `create` result is back. No other prompt or code touched.
+- Verified: rendered prompt contains the rule (12,930 chars), `bun run typecheck` clean, lint clean for the file. No live confirmation yet (no API key in this environment) — confirm with a live "teach me coffee" turn: expect create-then-speak, not speak-only.
+
+## 2026-11-01 21:09 IST (15:39 UTC) — Voice input upgraded from energy-gate VAD to Silero V6
+
+- Replaced the hand-rolled RMS + zero-crossing-rate VAD (`voice-activity.ts`, `use-voice-activity.ts`, deleted) with `use-silero-vad.ts` on `@ricky0123/vad-web@0.0.31` (`model: "v6"`, ONNX Runtime Web). Thresholds stay near the library defaults (`positive 0.3 / negative 0.25`); patience is tuned for slow speakers: `redemptionMs 1800` (was 1000 ms silence), `preSpeechPadMs 800` (replaces the old 4 s warm-recorder pre-roll), `minSpeechMs 300` (was 200 ms voiced-audio floor; blips now misfire inside the VAD).
+- One microphone capture: `use-voice-level.ts` keeps owning the stream/`AudioContext`/level meter and exposes a `getStream()` borrower; the VAD borrows it with no-op `pauseStream`/`resumeStream` and keeps its own worklet context. All `MediaRecorder` clip machinery (`recording`, `clipBlob`, warm pre-roll timers, 20 s safety discard) is gone from the voice path — `onSpeechEnd` delivers 16 kHz mono `Float32Array`, encoded via `encodeWav` into the unchanged `respond()` → `clipToWav` → `/api/orb/respond` pipeline. Sign-video recording still uses its own `MediaRecorder`.
+- Half-duplex preserved: model load/teardown follow `micLive`, `active` pauses/resumes listening without unloading the model (300 ms arm idle, 900 ms after a reply). `start()`-during-`pause()` races re-align through `activeRef`; mic-off during an in-flight `start()` gets a bounded 2 s settle-then-destroy. Permission denial, disconnects, model-load and mid-arm failures surface as before plus a new `vadError` caption; `userSpeaking` drives a `Hearing you…` caption and `Loading voice detection…` shows during model fetch. A busy check drops a segment completing in the same tick a turn starts so it can never abort the in-flight turn.
+- Assets: `silero_vad_v6.onnx` + `vad.worklet.bundle.min.js` self-hosted in `public/vad/` via new `scripts/copy-vad-assets.mjs` (`postinstall`); ONNX `.wasm`/`.mjs` loads from a `onnxruntime-web@1.31.1`-pinned jsDelivr path (added as an exact direct dependency).
+- Verified: real FrameProcessor run with scripted probabilities — 1 s mid-utterance pause stays one segment, 150 ms blip misfires, two words 2.5 s apart split, 800 ms pre-pad present; WAV glue outputs valid 16 kHz mono PCM16; `bun run typecheck` clean, `bun run lint` exit 0 (warnings only, none new), `bun run build` succeeds with vad-web + ort in a lazy client chunk. AGENTS.md voice/VAD sections updated. No live-mic browser test (no browser in this environment) — confirm on device: first-syllable capture, pause tolerance, and turn handoff.
+
 ## 2026-10-31 08:31 IST (03:01 UTC) — Fix `no_reply` after action rounds: forced answers keep the speak tool
 
 - Root cause: after a turn created a card or ran another action, `forceAnswer` requested the final answer with tools disabled but still validated it through `validateSpeechClaim`. Rule B requires every utterance after an action to cite an execution, and only a native tool call has an `evidence` slot. A tools-free plain answer could therefore never pass, so any action turn that reached the round cap was guaranteed to fail with `no_reply`. The forced prompt also told the model to use the speak tool while suppressing it.
@@ -758,3 +772,124 @@ Per request, the stills path is gone: the dashboard records a video clip, `POST 
 - Removed dead stills path: `sign-frames.ts` + its tests, `respondToFrames` (+ `image_url` part), route frames branch, prompt video-frames rule.
 - Think-step moved into `DEFAULT_SIGN_PROMPT` (handshape/location/movement, never transcribe unseen signs).
 - Verified: `bun test tests/` all pass, `tsc` clean; live WIN_20261031_11_11_21_Pro.mp4 → "I love you" through the app route.
+
+## 2026-11-01 UTC — NVIDIA removed; research-backed sign prompt; universal media context
+
+- Deleted the NVIDIA path entirely (`lib/nvidia-sign.ts` → `lib/sign-video.ts` opencode-only; route + `/test` UI provider selects removed; `SIGN_VIDEO_MODEL = muse-spark-1.3-contributor`).
+- Research pass (arXiv sign-language-translation survey + SignLlama/AttnSign/DualAnchor/SignGPT/ReSCUE findings): prompt now forces visual primacy (ignore captions), three numbered passes, no fluent-English smoothing, cross-check hands vs on-screen text, `Transcription:` final line. `/orb/transcribe` extracts only that line (≤30 words) or a bare short reply, else fails clean.
+- Validation: HELLO / GOOD MORNING / I LOVE YOU / YOU LOVE ME correct; caption-adversarial clip (GOODBYE text over HELLO signing) reads HELLO from the hands.
+- Universal media context: dashboard keeps the last signed clip; the immediately following turn (text or audio) carries sampled stills as `mediaFrames` so "that sign" resolves against video, not just words. One-shot (cleared after attach or on new media/end).
+- Verified: 337 pass / 0 fail, `tsc` clean, lint zero errors.
+
+## 2026-11-01 UTC — H-sign test finds the perception floor (not a prompt bug)
+
+- New prompt drops the caption clause, adds fingerspelling run-together + stillness-decides-letter rule, mirrored to the test page.
+- Hard clip `H ASL [r2lXfwwPiLc].mp4` (held H handshape at cheek): model reads CANDY, then SHE/HER, then HOME across runs — never H. A direct probe ("how many fingers extended?") answers "1 index" while the frames unambiguously show two.
+- Conclusion: finger-count/orientation distinctions (H vs U, E/S/A/M/N family) sit below this pipeline's perception floor at typical framing distance — no prompt wording fixes miscounted fingers. Mitigations: sign close to the camera, hold static letters, good light (hint already on the Sign button). Single-shot transcription of ambiguous handshapes stays best-effort with fail-clean retry.
+- Regression check: HELLO / GOOD MORNING / I LOVE YOU / YOU LOVE ME still transcribe correctly.
+
+## 2026-11-01 UTC — Research-backed prompt v3 + H-sign perception floor
+
+Applied three sources to DEFAULT_SIGN_PROMPT (server + /test mirror kept in sync):
+- Mt. SAC 5 Parameters: pass 2 now requires handshape (categorical label), palm orientation (in/out/up/down/left/right), movement (path + repeats), location (chin/forehead/chest/front, start→end), non-manuals (head/brows/eyes/mouth open-closed), 1H vs 2H with each hand's role.
+- Ding & Martinez: all components required (subsets inappropriate); stillness decides letter-vs-lexical sharing a handshape; trust fingers visible across most frames; movement bursts mark segment boundaries.
+- Terhune-Cotter & Emmorey: read as language, not gesture-guessing (resemblance is not evidence); mouth and face carry phonological load; iconicity ignored.
+- Caption handling: model must write down on-screen text first, then ignore it; Transcription line required (≤12 words, UNCLEAR fallback). Extraction is label-agnostic (Transcription: line → short tail → short full text → 502 retry).
+- H-sign hard case (`H ASL [r2lXfwwPiLc].mp4`, held H at cheek): CANDY/APPLE/HOME/SHE reads — never H. Direct probe ("how many fingers extended?") answers "1 index" on a clear two-finger hold: finger-count resolution at conversational distance is below this pipeline's perception floor. No prompt fixes that; mitigation is physical (close to camera, hold still, good light) or a hand-crop stage.
+- Validation: HELLO / GOOD MORNING / I LOVE YOU stable; caption-adversarial GOODBYE-over-HELLO reads HELLO from the hands; WIN_20261031_11_42_Pro.mp4 was deleted mid-test (last reads: YOU LOVE ME / YOU LOVE).
+- Verified: 337 pass / 0 fail, tsc clean.
+
+## 2026-11-01 UTC — handpose/ Phase 2 fixed: motion-gated selection (LibHand rejected)
+
+- Phase 1 verdict: LibHand cannot build here (CMake 4.4 rejects its 2.8.6 floor; OGRE 1.9 required but unobtainable; no Boost/Xaw dev headers; 2014 OpenCV API vs OpenCV 5; OGRE-typed API). Custom parametric hand model instead, per the spec's own fallback.
+- New `handpose/` tree (Atlas untouched): CameraManager (camera index or file), HandSegmenter (YCrCb skin + morphology + hull/defects + tip/valley/wrist candidates), calibration (assumed 60° FOV intrinsics + file override; depth explicitly estimated-never-measured), NDJSON output, ctest suite.
+- Motion-gated selection fixes the face-vs-hand failure on the H clip: moving skin wins over larger static blobs; static face-only blobs vetoed; stickiness keeps holds; valley-adjacent fingertip filter kills elbow false positives; motion sub-box marks the hand part of merged blobs. Verified visually: rising hand isolated at conf 1.0 while the face is ignored.
+- Known limit (honest): static holds adjacent to the face still lock the face — pure contour methods cannot split them. Queued for Phase 5 (articulated model fit) + Phase 6 (identity tracking). Verified: ctest passes, ~20 ms/frame on 720p, tsc/lint untouched (C++ tree).
+
+## 2026-11-01 UTC — handpose usable end to end (daemon + bridge + /handpose)
+
+- Daemon emits normalized hull/tips/valleys/wrist in NDJSON (`--annotate out.png [--at N]`, `--bin` override for the bridge; in-tree build at `handpose/build/`, gitignored).
+- `handpose/bridge.ts`: spawns the daemon and republishes frames over WebSocket (:3799). No WASM (no emscripten here); native daemon + browser client instead.
+- New `/handpose` page: local camera preview with 2D feature overlay (bbox, motion box, hull, tips, valleys, wrist), Three.js panel with orbit (points on z=0, badge states depth is estimated not measured), fps/ms/confidence readout. Three.js added as a dependency.
+- Verified live: file source → bridge → WS JSON with features at ~25 ms/frame; /handpose serves 200; ctest + bun suite green (337), tsc/lint clean. Browser-camera path untestable headless — needs a real run on the laptop.
+
+## 2026-11-01 UTC — Removed the OpenCV hand-tracking track
+
+Per request, deleted the entire model-free CV build (`handpose/` C++ pipeline, bridge, `/handpose` page, three.js): too much machinery for the job. The kept path stays simple — dashboard records a video clip, the clip goes straight to the video AI for transcription, and the text enters the normal turn. Verified after removal: tsc/lint clean, 337 tests pass, `/api/orb/transcribe` live test still returns HELLO.
+
+## 2026-11-01 UTC — Checkbox widget alongside the timer
+
+- New `<checkbox label="…" />` block widget (own line at column 0, outside code fences): label required (≤80), optional `checked="true|false"`, no `send`/`show` — it reports nothing and opens nothing. Unknown checkbox attributes are model-readable failures, same as timers.
+- `lib/interactive-markdown.ts`: discriminated `WidgetBlock` union, per-tag attribute validation, shared `WIDGET_NAMES` allowlist (add future widgets there instead of another negated if).
+- `components/dashboard/checkbox-card.tsx`: accessible toggle (`<input type="checkbox">` + label), local state only.
+- Prompt + tool contract teach both widgets: `rules.ts` gains `### Checkbox widget`, `create` description names both.
+- Verified: 350 pass / 0 fail (13 new checkbox tests), `tsc` + lint clean.
+
+## 2026-11-01 UTC — Even vertical rhythm in cards
+
+- `InteractiveMarkdown` now lays blocks out in a `flex flex-col gap-3` stack instead of a bare fragment, so Markdown chunks and widgets share one even rhythm; dropped the timer's own `my-3` (it doubled up with the stack gap).
+- Verified visually with a temporary all-widgets page (since removed) via headless Chromium screenshot: heading, text, list, checkbox ×2, timer, counter, rating, progress, closing line all evenly spaced.
+- 361 tests pass, tsc/lint clean.
+
+## 2026-11-01 UTC — `create` takes a cards array; cards gain left/right/sidebar types
+
+- `create` now takes one `cards` array (1–6 cards, in order) instead of one card per call; each card has id/title/content plus optional `type`: `"card"` (auto-placed, default), `"left"`/`"right"` (pinned to that side column), `"sidebar"` (persistent reference rail that never collapses). Validation is per-item with model-readable errors (unknown type, missing title, bad widget, >6).
+- Dashboard: sidebar rail on wide screens (persistent, always open, distinct sage panel), pinned left/right columns with auto-fill; narrow stacks sidebars above cards; `data-card-id` preserved so timer `show` still scrolls.
+- Prompt teaches the array shape + when to use each type; examples rewritten to single-call form. Legacy single-card `runCreate` args still validate (back-compat for older turns/tests).
+- Native `tools` schema carries full item definitions (name/type/required/maxLength via new `ToolParameter` object-array variant); prompt line shows the shape: `create — {cards?:[{id?,title,content,type?}]}`.
+- Verified: 367 pass, tsc/lint clean; dev server booted from atlas-old after the old tree was replaced by an empty scaffold (stale server on :3000 killed); live `/api/orb/transcribe` returns clean single-line transcripts.
+
+## 2026-11-01 16:16 IST (10:46 UTC) — VAD floor tracking and browser-voice fallback
+
+- VAD now matches the atlas reference design: each mic frame is `{rms, zcrHz}` (zero crossings per second, halved, measured off the analyser clock in `use-voice-level.ts`), and `voice-activity.ts` gates speech on an adaptive dB noise floor (tracked while quiet, fast-rise/slow-fall, clamped -70..-35, soft in-band voices excluded from learning) plus an 80–9000 Hz voice-shaped crossing band. Rumble and hiss at any loudness no longer start a turn; thresholds are 13 dB over floor to start, 6 dB to hold.
+- Verified by simulation: floor converges to a fan room (~-50 dB), voice onset fires `start`, 1.2 s silence fires `end` with counted voicedMs, hiss and rumble onsets stay silent.
+- MP3 fallback is gone, replaced by browser TTS like the reference `use-mouth.ts`: the route always closes with `audio-done` (no whole-reply `synthesizeSpeech` call), and `use-orb-turn.ts` speaks the reply via `speechSynthesis` when no PCM arrived — token-guarded against late `end` events, cancelled by every reset/stop. `audio-mp3` removed from the `TurnEvent` union, reader, debug panel, reveal triggers (`"browser"` replaces `"mp3"`), and the dashboard's hidden `<audio>` element + `aiAudio`/`onAudioEnded`/`onAudioFailed`/`audioRef` plumbing. `synthesizeSpeech` stays for `api/voice-preview` MP3 bytes.
+- Typecheck clean, no new lint warnings; no test suite to run (tests/ was removed at the user's direction).
+
+## 2026-11-01 16:35 IST (11:05 UTC) — PromptDock becomes the atlas chatbox
+
+- Committed the voice work first (`feat(voice)` checkout point), staging only this session's files; the other agent's sign/widget hunks and the tests/ deletions stay uncommitted.
+- Replaced `prompt-dock.tsx` with `chatbox.tsx`, a full port of the atlas example: `+` tools menu (upload, library, /imagine, /search, /research, /think) with search filter, Escape/outside dismissal, and focus return; file picker with attachment chip; rounded 1.75rem slide-up form with `inert` when closed and the blur-ellipse edge peek. Menu commands insert `/command` text; attachments ride along as `(attached: name)` words since the turn takes text only. Sending spinner kept from the dock; demo-only bits (8-word truncation, onStep/onComposingChange) dropped in favor of the full-text `onSendText` contract.
+- Typecheck clean; only lint note is the example's own `role="dialog"` warning, kept for fidelity.
+
+## 2026-11-01 16:45 IST (11:15 UTC) — Atlas remembers the user like the reference
+
+- Gap found: `/start` collected name, age range, and talk styles into localStorage, but nothing ever told the model — Atlas couldn't actually remember the user. The reference keeps the same split (chat notes per session, profile persisted in storage) and personalizes from it.
+- Now `parseProfile()` in `lib/onboarding.ts` extracts the remember-worthy slice (name, age range, talk-style picks; voice/pace stay client-side), the dashboard sends it with every voice and typed turn, the route validates it, and `buildAtlasSystemPrompt(now, profile)` renders a `## Who you're talking to` section into the cached system prefix: name (use sparingly), age range, and talk styles from the catalog summaries. No profile, no section — anonymous turns are byte-identical to before.
+- Verified: typecheck/lint clean; rendered prompt checked for a full, partial, and junk profile (junk parses to undefined and is dropped).
+
+## 2026-11-01 17:05 IST (11:35 UTC) — Session memory raised to a 100k-token budget
+
+- Replaced the 6,000-char history cap with a 100k-token budget (~10% of the model's 1M-token window, ~65x the recall): `trimHistory`/`parseHistory` now budget by estimated tokens (chars/4) with the same pair-preserving shape. Verified: 198 messages land just under budget with pairs intact; one oversized pair is clipped, not dropped.
+- Per-message cap 6k to 50k chars (clips nothing legit, stops one paste evicting the session); stored messages 40 to 500 as a sessionStorage-quota backstop. Safety caps (audio bytes, tool args, timers) untouched — they don't affect recall.
+
+## 2026-11-01 17:20 IST (11:50 UTC) — History moves to localStorage
+
+- Chat history now persists in `localStorage` (~5-10MB) instead of tab-scoped `sessionStorage`, so memory survives tab closes and has headroom past the 100k-token turn budget. Same storage key, so existing saved sessions carry over.
+- Writes retry with a shrinking tail (full, then last 250, then last 100) on quota/blocked-storage failure instead of silently losing persistence. The Baseten affinity id stays in `sessionStorage` — it is a per-tab routing hint by design.
+
+## 2026-11-01 17:30 IST (12:00 UTC) — Fresh history key, no migration
+
+- History key renamed to `atlas-orb-history`; the old `atlas-orb-session` carry-over is gone and the orphaned entry is deleted on next load. Everyone starts memory fresh.
+
+## 2026-11-01 18:00 IST (12:30 UTC) — Compat shims removed, history/session keys renamed
+
+- Keys: history is `history`, affinity is `session` in storage; `readSession`/`persistSession` are now `readHistory`/`persistHistory`. No migration — user clears the browser themselves.
+- Removed: `searching` NDJSON frame (route sends `tool` for websearch; union, reader, debug panel, and client handler updated), single-card `create` triplet plus the `ToolResult.card` chain, the `{"transcript","speak"}` text envelope (plain prose is spoken as-is), and the "older" framings in comments.
+- Kept deliberately: flat native-call parsing (the live native path, not legacy — comment fixed), and the `toToolTrace` null for unknown tools (one line guarding the label map, not compat).
+
+## 2026-11-01 18:20 IST (12:50 UTC) — Prompt X-Ray diagnosis: spoken procedures
+
+- Applied the prompt-xray `prompt-debugger` skill (read from GitHub, not installed) to the coffee wire: model spoke a full procedure instead of cards. Diagnosis: no runtime shape enforcement, no procedure ban in the `speak` tool description, path decision duplicated in two prompt sections.
+- Smallest fix applied: one ban sentence in the `speak` tool description. Shape gate and path-decision dedupe deferred until the confirmation test (teach-me-coffee must produce cards + headline) passes or fails live.
+
+## 2026-11-01 18:45 IST (13:15 UTC) — Evidence system removed, speak redefined as summary
+
+- Removed the whole evidence apparatus the model found confusing: `evidence` args, exec ids, result stamps, citation rules A-C, the ledger module, and every prompt/example teaching them. Identical repeat calls still share one stored outcome (request-keyed run cache); tool messages carry raw results.
+- What remains of integrity is text-only and id-free: tool-call JSON as text rejected, Markdown withheld from speech, and action claims withheld when no action ran (verified live with mocked turns: fabricated search claim withheld and repaired, plain speak passes first try).
+- `speak` redefined per direction: the short summary of the full reply, never how-to/procedures, full text over ~100 words goes in a card with a compressed spoken summary. In the tool description and the Speech prompt section.
+- Honest cost: nothing now stops the model from claiming an action whose result it misreads — post-action utterances are accepted on trust plus the shape/pattern checks. If invented search claims appear, this removal is why.
+
+## 2026-11-01 19:00 IST (13:30 UTC) — AGENTS.md prompt-engineering docs rewritten
+
+- Rewrote the section to match reality: removed test-suite/json_object/evidence claims; documented the summary speak contract, 100-word rule, context-noun rule, fail-defaults, decision-point bans, round counter, fence citation rights, and mocked-turn verification. Added Vane and prompt-xray-skills to reference reading.

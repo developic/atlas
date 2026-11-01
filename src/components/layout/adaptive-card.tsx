@@ -25,7 +25,7 @@ type AdaptiveCardProps = {
  * smooth `grid-template-rows` slide (0fr → 1fr) plus an opacity fade, which
  * makes the hover transition feel fluid instead of popping. `prefers-reduced-motion`
  * removes both the slide and the fade. The content is rendered by
- * `InteractiveMarkdown`, which also supplies the safe timer widget.
+ * `InteractiveMarkdown`, which also supplies the safe widgets.
  */
 export function AdaptiveCard({
   card,

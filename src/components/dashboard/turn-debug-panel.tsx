@@ -27,7 +27,6 @@ const TABS: { id: Tab; label: string }[] = [
 
 const FRAME_STYLES: Record<TurnEvent["status"], string> = {
   transcript: "bg-sage-wash text-sage-text",
-  searching: "bg-sage-wash text-sage-text",
   tool: "bg-muted text-ink",
   "speak-delta": "bg-sage-wash text-sage-text",
   audio: "bg-muted text-ink-muted",

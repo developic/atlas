@@ -2,16 +2,9 @@
 
 import { useRef, useState } from "react";
 
-import type { SignProvider } from "@/lib/nvidia-sign";
-
-/** Mirrors DEFAULT_SIGN_PROMPT in lib/nvidia-sign.ts, which is server-only. */
+/** Mirrors DEFAULT_SIGN_PROMPT in lib/sign-video.ts, which is server-only. */
 const DEFAULT_PROMPT =
-  "Transcribe the American Sign Language signing in this video. Reply with only the transcribed utterance.";
-
-const PROVIDERS: { value: SignProvider; label: string }[] = [
-  { value: "nvidia", label: "NVIDIA omni" },
-  { value: "opencode", label: "Muse Spark 1.3 (video)" },
-];
+  "Transcribe the American Sign Language signing in this video. Decide only from what the signer\u2019s hands, face, and body do. First write down any on-screen text, captions, or labels you see, then ignore them completely \u2014 they are never the answer, even when they match. Work in three short passes, a few words per segment. 1. Segments: split signing from rest at movement bursts; ignore rest. 2. Signs: reason in 3D, not flat screen positions \u2014 track toward and away from the camera as well as up, down, left, and right, hand rotation, which hand or finger is in front when they overlap, and distance from the torso. A finger hidden behind the hand is occluded, not absent. Outward-from-body versus sideways movement distinguishes signs that look alike flat. For each signing segment give the 5 parameters  \u2014 handshape as a categorical label (H-hand, 1-hand, B-hand, fist, open-5), palm orientation (in, out, up, down, left, right), movement (path: up, down, forward, back, circle, tap, wiggle, or none, plus repeats), location (chin, forehead, chest, front of body, start to end), non-manuals (head, brows, eyes, mouth open or closed) \u2014 and 1H vs 2H with what each hand does. Read as language, not as generic gestures: resemblance to a hearing gesture is not evidence. Trust fingers visible across most frames; brief flashes are transitions. A static hold is a fingerspelled letter (letters run together as one word); name a lexical sign only for its characteristic movement. End with a final line starting \"Transcription:\" followed by only the transcribed words (under 12 words) \u2014 your best reading. Write Transcription: UNCLEAR only if nothing at all is readable.";
 
 type SignResult = {
   transcript: string;
@@ -22,7 +15,7 @@ type SignResult = {
 };
 
 /**
- * Signing-video test console: a full clip goes to NVIDIA's omni model and
+ * Signing-video test console: a full clip goes to Muse Spark and
  * the transcription comes back, bypassing the Baseten turn pipeline (which
  * has no video input). The API key never leaves the server.
  */
@@ -30,7 +23,6 @@ export function SignTest() {
   const fileRef = useRef<HTMLInputElement | null>(null);
   const [fileName, setFileName] = useState("");
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
-  const [provider, setProvider] = useState<SignProvider>("nvidia");
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<SignResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -48,7 +40,6 @@ export function SignTest() {
       const form = new FormData();
       form.append("video", file);
       form.append("prompt", prompt);
-      form.append("provider", provider);
 
       const response = await fetch("/api/sign-test", {
         method: "POST",
@@ -81,22 +72,6 @@ export function SignTest() {
           aria-label="Signing clip"
           className="font-mono text-xs text-ink file:mr-3 file:rounded-full file:border file:border-line file:bg-paper-2 file:px-3 file:py-1.5 file:font-mono file:text-xs file:text-ink hover:file:border-sage"
         />
-      </div>
-
-        <div className="flex flex-col gap-1">
-        <span className="font-mono text-xs text-ink-muted">Model</span>
-        <select
-          value={provider}
-          onChange={(event) => setProvider(event.target.value as SignProvider)}
-          aria-label="Signing model"
-          className="w-full rounded border-line bg-paper-2 px-3 py-1.5 text-ink font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-        >
-          {PROVIDERS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
       </div>
 
       <label className="flex flex-col gap-1 font-mono text-xs text-ink-muted">
