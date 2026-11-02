@@ -1,5 +1,387 @@
 # Project Context
 
+## 2026-11-02 17:40 IST (12:10 UTC) — Cleanup round 2: correct sign MIME, abort semantics, docs
+
+- Fixed a real signing bug: `assertSignVideo` now returns the detected MIME and `transcribeSigningVideo` puts that exact type in the data URL, instead of always claiming `video/mp4`. A WebM upload now fails honestly with the gateway's "MP4 only" message rather than being mislabeled. The sign recorder also tries MP4 first so capable browsers send an accepted clip.
+- Shared video transport now maps a caller abort to `499` instead of a 502 "unreachable", so client stops and route cancellations stay distinguishable.
+- Minor copy: blind mode's hint mentions obstacle warnings; the guard's paused status says "Atlas is busy" (it also pauses for frame capture, not just replies). Frame-capture question cap is a named constant.
+- AGENTS.md codebase map and architecture notes now cover access modes, the camera channels, the shared video transport, mood/frame tools, and the new dashboard hooks; the server-only module list is current.
+- Verified: live sign probe MP4 → 200 with usage, WebM → 502 with the MP4-only reason; `bun run test` 125/125, typecheck clean, build clean, dashboard/tunnel 200. Nothing staged or committed.
+
+## 2026-11-02 17:20 IST (11:50 UTC) — Cleanup: one video transport, one frame-capture hook
+
+- `lib/muse-video.ts` now owns the OpenCode Go video request shape (URL, model, auth, session header, timeout, output extraction, MP4 validation). `vision-guard.ts` and `frame-video.ts` keep only their prompts, schemas, caps, and error mapping — the duplicated fetch/parse blocks are gone.
+- The `frame` capture flow moved out of `dashboard-flow.tsx` into `use-frame-capture.ts`: intent, 60 s expiry, clip recording, video request, still fallback, abort, and mode reset now live together. The dashboard only wires `request` through a ref and renders.
+- `camera-clip.ts` is the single MP4 recorder used by both the frame tool and the obstacle guard (previously duplicated in `use-vision-guard`).
+- `use-camera-gestures.ts` now owns the orb/camera double-tap state, timers, and spoken camera confirmation; the dashboard only passes the callbacks and the double-tap hint.
+- `sign-video.ts` also uses the shared transport now (token usage included), so the Go Responses request shape exists once; the sign route's live probe returned 200 with `{transcript:"", readable:false}` on a non-signing clip, confirming the transport.
+- The guard now pauses while a frame capture is recording/sending (`isCapturing`), so the two never record the same stream at once, and repeated vision failures back off from 1.5 s to 10 s instead of retrying at a fixed rate. The warning-speech timeout is cleared when `onend` fires.
+- No behaviour change: live re-probes after the refactor still return a frame description, a guard warning on the obstacle clip, and silence on the empty clip.
+- Verified: `bun run test` 125/125, `typecheck` clean, production build clean, oxlint clean apart from pre-existing dashboard warnings. Nothing staged or committed.
+
+## 2026-11-02 17:05 IST (11:35 UTC) — `frame` sends a short video, not a still
+
+- The `frame` tool now records a 2 s MP4 clip from the live camera and sends it to the video model (`/api/orb/frame`), which returns a typed description. That description enters the conversation as the follow-up user message, so the main model answers in the user's mode (speech/text/cards) without ever receiving video itself — the main Baseten chat endpoint has no video input.
+- `camera-clip.ts` owns the recording helper (MP4 codecs only; the gateway rejects WebM), shared by the frame tool and the blind obstacle guard. The still-frame path remains only as a fallback when the browser cannot record MP4 or the clip pass fails.
+- `frame-video.ts` validates MP4-only clips (10 MB cap), uses the strict `{description, clear}` schema, and caps the description. No clip is stored or logged.
+- Live checks: obstacle MP4 → a concrete bench/table description; empty MP4 → a "no people or text" description; WebM → 400 MP4-only; the follow-up turn answered the description correctly in blind mode.
+- Verified: `bun run test` 125/125 (new `frame-video.test.js`), `typecheck` clean, oxlint clean on touched files. Nothing staged or committed.
+
+## 2026-11-02 16:59 IST (11:29 UTC) — `frame` tool: camera vision in every mode, with consent
+
+- New `frame` tool in the base tool set, so autism, mute, deaf, blind, and accessibility-off all get it. The server cannot capture; the tool authorizes a capture, the client grabs one still from the live preview after the turn, and sends it back as the next turn's image. The model is told to wait for that image and not describe it early.
+- Camera status is a first-class turn value: `cameraOn` travels with every request, renders as a `## Camera` block beside the user message, and lands in `ToolContext`. Off makes `frame` fail readably with "ask permission"; a same-round `open_camera` flips the status so `open_camera` + `frame` can run together after the user agrees.
+- Client follow-through: a `frame` call sets a 60 s intent; when the turn is idle and the camera is live, it captures one frame and sends "The camera frame you requested is attached…" as a follow-up turn. If the camera was off, the intent survives until the consent turn opens it, then captures. Mode changes clear the intent.
+- Blind mode keeps its existing obstacle guard; `frame` is the still-image path for “what is this?”, and the answer is spoken.
+- Live checks: camera off + "What is this?" → model says the camera is off and asks; "Yes, open the camera. What is this?" → `open_camera` + `frame`; autism + camera on → `frame`, then the attached still was described correctly. Guard also still records MP4 clips.
+- Tests: new `tests/frame.test.js` (registered tool, off fails with permission text, on authorizes and forbids guessing); access-mode tests updated for the base tool count. `bun run test` 120/120, `typecheck` clean, oxlint clean apart from pre-existing warnings. Nothing staged or committed.
+
+## 2026-11-02 16:44 IST (11:14 UTC) — Obstacle guard sends fresh MP4 clips, not stills
+
+- `useVisionGuard` now records a new 2 s clip from the live camera stream for every check and waits for the spoken warning before recording the next one; nothing is reused between warnings. A single fresh frame remains the fallback when `MediaRecorder` cannot produce MP4.
+- `/api/orb/guard` accepts multipart `video` (plus JSON frame fallback) and `vision-guard.ts` sends `input_video` with the real MIME. Live probe: the gateway rejects `video/webm` ("Supported: MP4"), so only `video/mp4` is accepted; browsers without MP4 recording use frames instead of failing every cycle.
+- The prompt now describes a short live clip and treats the previous warning as a wording hint only, so the current clip is judged independently.
+- Live checks: 2 s empty MP4 → no hazard in 2.4 s; obstacle MP4 → "Table directly ahead, about two steps away." in 2.9 s; webm → 400 with the MP4-only message.
+- Verified: `bun run test` 115/115, `typecheck` clean, oxlint clean on touched files. Nothing staged or committed.
+
+## 2026-11-02 16:28 IST (10:58 UTC) — Double tap on the orb and the camera preview
+
+- Blind mode: double-tapping the orb toggles the camera (and therefore the obstacle warnings). Because the orb already owns a single-tap action, that action is held for one 300 ms double-tap window and cancelled when the second tap arrives; other modes keep the immediate single tap.
+- The camera preview is its own double-tap surface in every mode: single taps do nothing (and stop propagating to the orb), two taps within 300 ms toggle the camera. It announces "Camera off." / "Camera on. Obstacle warnings are active." only when the mode allows speech.
+- The orb's accessible label gains the double-tap hint in blind mode; the preview label says "Double tap to turn the camera off."
+- Verified: `typecheck` clean, `bun run test` 113/113, oxlint clean apart from pre-existing dashboard warnings. Nothing staged or committed.
+
+## 2026-11-02 16:08 IST (10:38 UTC) — Vision guard output budget doubled
+
+- `vision-guard.ts` `max_output_tokens` 1,024 → 2,048. The contract reply is tiny; the headroom is for the gateway's reasoning tokens, which made a no-hazard frame come back `incomplete` at 256. No change to the schema, prompt, or client behaviour.
+
+## 2026-11-02 16:04 IST (10:34 UTC) — Blind obstacle warnings ride the camera; autism is the default mode
+
+- New blind-only vision channel: `useVisionGuard` samples the live preview every 3 s, `POST /api/orb/guard` validates the mode and frame, and `lib/vision-guard.ts` asks Muse Spark for a strict `{hazard, urgency, message}` verdict. No frame is stored, and the channel never enters the conversation thread.
+- It is wired to the camera, not a button: whenever blind mode has a live camera (`signStatus === "live"`), warnings run automatically; turning the camera on (button or the `open_camera` tool) is the only activation step. The guard pauses while a turn/reply is running, while the tab is hidden, and while a previous frame is still being checked. Spoken through the browser voice, with a 7 s repeat floor and an immediate cut-in for `stop`.
+- Removed the cane/guide-dog disclaimer from both the blind prompt line and the UI hint, per request.
+- Default mode is now autism: the bar has no off/normal state and starts on autism; tapping the active mode no longer deselects. The API keeps the internal accessibility-off path for test clients/evals, but the product UI always sends one of the four modes.
+- Guard route live checks: an empty corridor frame → `{hazard:false}`, a box-obstacle frame → `{hazard:true, urgency:"caution", message:"Bench directly ahead, about two steps away."}`. `max_output_tokens` raised to 1024 after an empty frame came back `incomplete` at 256.
+- Verified: `bun run test` 113/113 (new `vision-guard.test.js`), `typecheck` clean, oxlint clean on touched files, dashboard 200 after a dev-server restart (the old process held a stale module graph for the new route). Nothing staged or committed.
+
+## 2026-11-02 15:50 IST (10:20 UTC) — Sign camera prefers the rear camera on mobile (correction)
+
+- Corrects the 15:40 entry: "front" there meant the camera facing forward (the back/rear camera), not the selfie camera. Mobile attempts are now `facingMode: { exact: "environment" }` → ideal `"environment"` → any camera; desktop keeps the webcam preference.
+- The preview now mirrors only when the active track reports `facingMode: "user"`. A rear-camera preview stays unmirrored, so text and the room are not flipped; a track that reports no facing mode also stays unmirrored.
+- `useSignVideo` exposes `facing` from `track.getSettings()` and clears it on disable; the dashboard uses it for the mirror class.
+- Verified: `typecheck` clean, `bun run test` 105/105, oxlint clean on touched files. Nothing staged or committed.
+
+## 2026-11-02 15:40 IST (10:10 UTC) — Sign camera prefers the front camera on mobile
+
+- `use-sign-video.ts` now builds an ordered set of camera constraints: on mobile it asks for `facingMode: { exact: "user" }` first, then the ideal `"user"` hint, then any camera; on desktop it keeps the ideal hint then any camera. Previously a plain `video: true` fallback could open the rear camera on phones, which made the mirrored signing preview a view of the room.
+- The retry loop replaces the duplicated success handler: a live stream is attached in one place, and only constraint-miss errors (`OverconstrainedError`, `NotFoundError`) advance to the next attempt — a denied permission still stops immediately.
+- Same stream powers both the signing recorder and the normal `open_camera` preview, so both now start front-facing on a phone.
+- Verified: `bun run test` 105/105, `typecheck` clean, oxlint clean on the touched file. Nothing staged or committed.
+
+## 2026-11-02 15:33 IST (10:03 UTC) — Blind mode hides the typed chatbox
+
+- Added `chatbox` to the access capability table: false for blind, true for autism/mute/deaf and accessibility-off. The dashboard renders `<Chatbox>` only when the capability allows it, so blind mode keeps voice as the only input instead of offering a field the user cannot see.
+- The check lives in `access-modes.ts` with cards/sign/microphone, so it is one table entry rather than a scattered `mode === "blind"` in JSX. Accessibility off still shows the chatbox exactly as before.
+- Verified: `bun run test` 104/104 (new capability assertion), `typecheck` clean, oxlint clean on touched files. Nothing staged or committed.
+
+## 2026-11-02 15:31 IST (10:01 UTC) — Autism mood tracker: `mood` tool, private log, analyst, doctor report
+
+- New `mood` tool (autism only): `log` stores a 1-5 score plus the user's own short note, `trend`/`history` answer from the client snapshot, and `report` returns a doctor-ready summary for a create card. The "sub-agent" is deterministic (`lib/moods.ts`): it reads the log and returns count/average/direction/lowest/highest, so a trend answer can never be invented by the main model.
+- Storage stays on device: Dexie v3 adds a `moods` store (`lib/db/moods.ts`), entries are written only from turn directives, and each autism turn attaches at most 60 recent entries as a MOOD LOG block beside the user message (never inside the cached prompt). Non-autism modes never send or store moods.
+- Prompt: autism's mode section gains the log/trend/report rules plus the clinician boundary (no diagnosis, no cause claims, no treatment/medication advice; self-harm → contact local emergency services or a crisis line). Autism examples add the log → trend → reply path and the honest "I can't send it myself" line for a doctor card.
+- The report is never sent by Atlas: the model creates a card titled "Mood summary for your doctor" and says the user can show or share it.
+- Fixed a real registry bug the live run exposed: native tool calls deliver numbers as JSON numbers, and `validateToolArgs` silently dropped them for string-typed parameters (the model then repeated the identical mood call until the turn budget). Finite numbers are now converted to strings; tool parsers still validate range. This also repairs reminder `intervalDays`/`snoozeMinutes` for native calls.
+- Verified: `bun run test` 104/104 (new `tests/moods.test.js` covers score/note validation, snapshot strictness, declining/steady/empty analysis, report contents, log directives, numeric-score validation), `typecheck` clean, oxlint clean on touched files. Live: "I feel really awful" → one `mood log` (2/5) + warm reply, no diagnosis; a declining six-entry log → "trend is down, from 3.7 to 1.7"; "send it to my doctor" → one create card "Mood summary for your doctor" with "I cannot send it myself". Nothing staged or committed.
+
+## 2026-11-02 14:14 IST (08:44 UTC) — Accessibility modes drive prompt, tools, audio, cards, and sign
+
+- `lib/access-modes.ts` is the single decision table: exactly four modes (`autism`, `mute`, `deaf`, `blind`) and `null` for accessibility off. No `standard` mode — off means the previous behaviour, and the base prompt is still byte-identical (16,232 chars).
+- Per mode: autism keeps every tool/audio/camera with no sign; mute keeps every tool and adds sign, TTS only when the user turns voice replies on (`isSpeechEnabled`); deaf removes `speak`, refuses audio-in turns, never calls TTS, still allows cards and sign; blind removes `create`, renders no cards, and relies on speech.
+- Prompt assembly is centralized: `atlas-prompt.ts` composes shared base + `instructions/modes.ts` section, and drops sections that need an absent tool (Speech for deaf; Cards/Widgets for blind). Mode examples replace the shared ones for deaf/blind so no example teaches an unregistered tool.
+- Tool registration is centralized too: `toolsFor(mode)` feeds the prompt and the provider `tools` array; `restrictCalls` rejects a reconstructed call, and `executeTool` refuses anything outside `allowedTools` — hiding is not the only guard.
+- Delivery is app-owned: the route only synthesizes speech when the mode permits it, and the client never primes audio, plays PCM, or falls back to the browser voice when speech is off. A mode change stops the turn/mic/signing, disables the sign camera when the new mode forbids it, and opens a fresh thread so no previous mode's history carries over.
+- Sign recognition is separate from the normal camera: `open_camera` stays in every mode, while the Sign UI and `/api/orb/transcribe` accept only mute/deaf with an explicit consent flag; `null`/other modes get 403.
+- Notifications: the scheduler now takes the selected mode and forces the voice channel for blind, beep for the rest (mode off keeps the onboarding/pref behaviour).
+- Camera vs sign is separated in the tool surface too: `open_camera`'s description now says "the normal camera, not sign recognition" and drops "let me sign" from its trigger examples, so no mode reads a sign instruction from the shared blob.
+- Blind mode also hears failures: turn and local errors are spoken through the browser voice in that mode only, so an error never exists as text alone.
+- Tests: `tests/access-modes.test.js` (18 checks) covers the four ids, tool allow-lists, sign/cards/mic capabilities, voice policy, prompt isolation and section omission, and registry refusal. Verified: `bun run test` 87/87, `typecheck` clean, production build clean, 12/12 routing smoke, oxlint clean on all new/touched files (only pre-existing warnings remain elsewhere). Live against the running dev server: off/autism/blind returned PCM audio, mute returned none until `voiceReplies` was set, deaf returned none, audio posted to deaf was refused before the model, and `/api/orb/transcribe` returned 403 for autism/null and for deaf without consent. Live card check: deaf produced 4 cards with no audio, blind produced 0 cards with audio. Nothing staged or committed.
+
+## 2026-11-02 13:38 IST (08:08 UTC) — Access mode bar UI-first (autism, mute, deaf, blind)
+
+- New `lib/access-modes.ts`: `ACCESS_MODES` in the user's order (standard, autism, mute, deaf, blind), `ACCESS_MODE_META` labels/hints, `isAccessMode` guard. No behaviour — the turn loop, mic, and TTS never read it yet.
+- New `components/dashboard/access-bar.tsx`: a horizontal toolbar (bar, not sidebar) with the four modes — Flower2 / MicOff / EarOff / EyeOff icons, `aria-pressed` single-select, tap-active-again returns to standard, live hint line under the bar.
+- `dashboard-flow.tsx` holds `accessMode` state (default `standard`) and renders `<AccessBar>` above the orb; `handleAccessChange` toggles. Nothing else reads the state — motion/mic/TTS wiring is the next step, not this change.
+- Tests: `tests/access-modes.test.js` locks order, meta coverage, and the guard. Verified: `bun run test` 73/73, `typecheck` clean, oxlint clean on all new/touched files (only pre-existing `dashboard-flow.tsx` warnings and vendored `public/mediapipe/**` noise remain). Nothing staged or committed.
+
+## 2026-11-02 13:36 IST (08:06 UTC) — Prompt: legacy modules deleted, composer consolidated to one `atlas-prompt.ts`
+
+- Deleted `instructions/rules.ts` and `instructions/index.ts` — no remaining consumer (only the re-export hub referenced them), and their rule text had already been replaced by the part modules, so they were pure drift risk.
+- Folded the composer into `lib/atlas-prompt.ts` and deleted `instructions/atlas-prompt.ts`: the repo now has exactly one `atlas-prompt` file, which `model.ts` and the prompt-regression test already import. `instructions/` holds parts only — one module per rule.
+- Hub aliases dropped with the legacy modules (`ATLAS_INSTRUCTION_EXAMPLES`, `ATLAS_RULES`, `ATLAS_IDENTITY`, …) — nothing imported them. `ATLAS_EXAMPLES` and `formatCurrentDate` are re-exported from the composer for existing callers.
+- Verified: rendered prompt byte-identical in shape (16,232 chars, same sections, no legacy symbols), `bun run test` 69/69, typecheck clean, oxlint clean on `instructions/` + composer. Rename/extraction only — no rule text changed, so routing behaviour is unchanged. Nothing staged or committed.
+
+## 2026-11-02 13:30 IST (08:00 UTC) — Prompt split into part modules; `improved-v1.ts` → `instructions/atlas-prompt.ts`
+
+- `instructions/improved-v1.ts` is now `instructions/atlas-prompt.ts` and holds assembly only — imports plus the ordered section array, zero prose. Each part owns a module beside it: `header`, `objective`, `loop`, `boundaries`, `decision`, `tool-policy`, `cards` (+ widgets), `speech`, `conversation`, `examples`, `final-check`; `profile.ts` owns the `## Who you're talking to` render, `identity.ts` owns the date block.
+- Legacy drift removed rather than duplicated: `rules.ts` is now a re-export barrel and `index.ts` assembles from the same part modules, so the old verbatim rule copies (which had degraded into typos and dead instructions such as "reply with tool calls only") are gone. One text per rule; editing a part changes both assemblies.
+- Tradeoff, stated plainly: two files now share the `atlas-prompt` basename (`lib/atlas-prompt.ts` re-export hub vs `instructions/atlas-prompt.ts` composer) — the hub was kept so `model.ts` and tests need no change. Collapsing the hub into the composer is a one-line follow-up if the twin names are unwanted.
+- Verified: rendered prompt byte-identical in shape (16,232 chars, same 12 sections in order), `bun run test` 69/69, typecheck clean, oxlint clean on `instructions/`. Routing smoke still owed for the rename-only change (no rule text changed). Nothing staged or committed.
+
+## 2026-11-02 13:22 IST (07:52 UTC) — Examples extracted to `instructions/examples.ts`, stale copy corrected
+
+- `improved-v1.ts` no longer carries its own `EXAMPLES` const: the worked turns moved to `instructions/examples.ts` as `ATLAS_EXAMPLES` and the composer imports it, so the live prompt and the legacy `index.ts` re-export read one text (the section had drifted into two divergent copies).
+- Corrected the file that was there: the old content taught the retired JSON envelope (`\`speak\` {text: …}`), narrated results with an "after the results:" step the loop does not have, and repeated the same Bun-release request twice (success and failure). It now matches the live protocol — plain text as a speech-turn ending, real tool shapes, one example per decision path, the 404 case, the screen re-creation case, the create-split case — plus reminder create/list coverage that was missing since the tool shipped.
+- Tradeoff, stated plainly: the examples module is now shared by live and legacy assemblies, so an edit there changes both; that is deliberate (one home per rule) and the legacy text is unused at runtime.
+- Verified: rendered prompt 16,232 chars, section order intact, `bun run test` 69/69, typecheck clean, lint clean on both files, 12-probe routing smoke 12/12. Nothing staged or committed.
+
+## 2026-11-02 13:15 IST (07:45 UTC) — Reminder zone-converter fix (IST stored as UTC) + readable clock grammar
+
+- Live bug from a real turn: "remind me at 1:09 PM" stored `fireAt` 13:09 UTC (6:39 PM IST) instead of 07:39 UTC. Root cause in `zonedToUtc`: the refinement returned `guess + second`, dropping the `first` correction — correct for UTC by luck, wrong for every other zone. Fixed to `guess + first + second`, with the lesson in the comment.
+- Same turn exposed two grammar gaps, both fixed: leading-clock phrases ("01:09 pm today") now parse — the dense `CLOCK_PATTERN` the user flagged is replaced by `CLOCK_HEAD_PATTERN` plus `parseClockTail` plain-vocabulary parsing (am/pm, today/tonight/tomorrow as named lists); "9 tonight" maps bare hours to PM instead of landing tomorrow morning (both clock and weekday paths).
+- Model-side hardening: tool description + TOOL_POLICY now forbid ISO pre-conversion (pass the user's words through; server resolves in the client zone), titles carry the time when no topic is named, and create confirmations echo the resolved wall time (`formatInZone`) so a mismatch surfaces in speech instead of storing silently.
+- Tests: IST + America/New_York regression cases (a zone bug can no longer pass on UTC-only coverage), evening mapping, bare-number refusal. `bun run test` 69/69, `typecheck` clean, oxlint clean on touched files. The user's 1:09 PM reminder stored before this fix fires at the wrong time — delete and re-create it by voice. Nothing staged or committed.
+
+## 2026-11-02 13:06 IST (07:36 UTC) — Reminder system: model tool + Dexie store + dual-channel scheduler
+
+- New `reminder` tool (create/list/find/update/delete/complete/snooze) wired through the full pipeline: `lib/reminders.ts` contract (relative-time grammar resolved against the caller clock, model-readable validation reasons, recurrence roll-forward, strict snapshot parse, guarded directives, blind-voice vs beep channel) → `lib/tools/reminder.ts` runner → registry (`ORB_TOOL_NAMES`, `ORB_TOOLS`, arg limits, `ToolContext` threading) → `model.ts` (snapshot injected into the user message tail, directives collected into `OmniTurn.reminders`, terminal-call + trace label) → `turn-stream.ts` (`reminders` on the `speaking` frame, degrade-not-throw sanitize) → `respond/route.ts` (snapshot + timeZone in, directives out) → `use-orb-turn.ts` (snapshot + zone per turn, directives applied to Dexie) → `lib/db/reminders.ts` (v2 store, mode pref) → `lib/reminder-scheduler.ts` (15 s poll, notification + beep on time, voice held until `aiState === "idle"`), mounted in `dashboard-flow.tsx`.
+- Channel follows onboarding: `blind` hears "Reminder: {title}" via browser speech; deaf/mute/autism/mobility get beep + Web Notification (anticipates the future vision/calm/sign split); stored `reminder-mode` pref overrides both. Voice never talks over a live turn — queue-until-idle is structural, and notification + beep already fired so nothing is lost while it waits.
+- Prompt touch is 3 lines (never-guess list, one TOOL_POLICY bullet, terminal-call list); `renderToolPrompt` picks the tool up automatically.
+- Tradeoff, stated plainly: list/find answer from the client-sent snapshot (server has no database), so a reminder created on another device appears only after this client's store syncs — acceptable for a single-device voice assistant; snooze is voice-driven, notification buttons deferred.
+- Caught by the new tests: V8 `Date.parse("at 6")` returns a 2001 fallback date — ISO acceptance is now an anchored pattern, never the parser's mood.
+- Verified: `bun run test` 64/64 (33 new), `typecheck` clean, oxlint 0 errors on all touched files (pre-existing warnings in untouched lines and user-WIP dashboard code left alone), end-to-end registry check (classify → run → directive → readable failure), 12-probe routing smoke 12/12 (existing routing undisturbed by the new tool). Nothing staged or committed.
+
+## 2026-11-02 12:33 IST (07:03 UTC) — Card spacing tighten, round 2
+
+- Incremental: paragraphs `my-1`→`my-0.5`, headings `mt-3/mt-2.5`→`mt-2`, lists/blockquote `my-1`→`my-0.5` / `space-y-0`, `hr`/`pre`/`table` margins down one step, tables `leading-relaxed`→`leading-normal`; block stack `gap-1.5`→`gap-1`; card bodies `leading-normal`→`leading-snug`, adaptive body `py-2`→`py-1.5`.
+- Tradeoff: near-minimal paragraph separation; going further risks walls of text with no paragraph break cue.
+- Verified: `bun run test` 31/31, typecheck clean, oxlint clean on touched files.
+
+## 2026-11-02 12:42 IST (07:12 UTC) — Naming doctrine replaced (subject over prefix) + media-stills/media-frames renames
+
+- Replaced the prefix-based `## Naming rules` in `AGENTS.md` with a research-grounded doctrine (Clean Code ch2 + Google TS/JS guide + Angular 20 folder-as-namespace shift): name the subject not the context, stems are earned not stamped, suffixes mark real forks only (`-server`), toolchain-read names (`use-*.ts`, `.test.js`) are contracts, one concept one name, noise-word ban (`data/info/util/helper/manager`), ≤3 words pronounceable searchable. Old "one domain prefix per concept" mandate is gone; casing/boolean/test rules kept.
+- Sanctioned renames (user-picked): `lib/sign-frames.ts` → `lib/media-frames.ts` (1 import: `respond/route.ts`), `lib/sign-stills.ts` → `lib/media-stills.ts` (1 import: `dashboard-flow.tsx`). Both files already described themselves as media context — the `sign-` stem was stale. Threads twins, orb trio, and integrity pair kept as-is with one documented distinction line each.
+- Tradeoff, stated plainly: `media-*` is broader and survives future non-sign camera uses, but loses the at-a-glance link to the sign path — the pair-distinction line in AGENTS.md carries that link instead.
+- Verified: `bun run test` 31/31 pass, `typecheck` clean, oxlint clean on renamed + importing files (only 3 pre-existing warnings inside user's WIP `dashboard-flow.tsx`, untouched). Stale-name sweep clean except the doctrine's own worked example and immutable historical `context.md` entries. Nothing staged or committed.
+
+## 2026-11-02 12:31 IST (07:01 UTC) — Card spacing tighten
+
+- Cards felt too airy (paragraph gaps ~16px + 12px block gap + relaxed leading). Tightened vertical rhythm only, no structural change: `ui/markdown.tsx` paragraphs `my-2`→`my-1`, lists `my-2`→`my-1` / `space-y-1`→`space-y-0.5`, headings `mt-4/mt-3`→`mt-3/mt-2.5`, `hr`/`pre`/`table` margins reduced; `interactive-markdown.tsx` block stack `gap-3`→`gap-1.5`; `adaptive-card.tsx` body `py-3`→`py-2`, `leading-relaxed`→`leading-normal`; `sidebar-panel.tsx` same leading change + title `mb-2`→`mb-1.5`.
+- Tradeoff, stated plainly: denser cards fit more content per scroll but long walls of text breathe less; list/bullet rhythm is tighter.
+- Verified: `bun run test` 31/31 pass, `typecheck` clean, oxlint clean on the four touched files (repo-wide lint still fails on pre-existing `public/mediapipe/**` vendored warnings).
+
+## 2026-11-02 13:15 IST (07:45 UTC) — Phrase-matching audit: structured sign contract, TTS narration boundary
+
+- Codebase-wide audit (no phrase matching to decide meaning): one real NL-phrase site found and replaced — `/api/orb/transcribe` no longer word-guesses transcripts (`Transcription:` label regex, `cleanLabel`, scaffolding phrase list, `^unclear\.?$`). `sign-video.ts` now sends a strict `json_schema` contract `{transcription, readable}` (gateway enforcement probed live: bare-prose prompts coerce into schema); parse guard `parseSignTranscription` + deterministic caps (`acceptableSignUtterance`, ≤30 words) replace the heuristics; `sign-prompt.ts` output/rules rewritten to the JSON contract (empty transcription + `readable:false` replaces the UNCLEAR sentinel). end-to-end verified on the real endpoint with a generated clip.
+- New narrow TTS integrity boundary: `lib/tts-integrity.ts` — only the evidence-backed leak label ("The user hears:", observed in `baseline-orig/news-today.json`), start-of-text anchored, mid-sentence prose untouched; applied in `deepgram-server.ts` for both MP3 and PCM paths; all-label text simply isn't synthesized (stream yields nothing → client falls back; MP3 raises tts). Prompt/claims stay Gate-1/Gate-2 business.
+- Dedupe: `model.ts` `speakableSegments` now reuses `looksLikeToolCall` exported from `speech-integrity.ts` (was a restated prefix check).
+- Tests: +11 (tts strip behaviors; sign contract guard/caps) → 31 pass / 0 fail; typecheck clean; my files lint-clean; prompt stable section byte-identical.
+- Live checks: 12-probe smoke 11/12 (`howto` missed create → variance check on the same request fired `create` with cards, so variance not regression); sign e2e returns `{readable:false, transcription:""}` on an empty clip; PCM streaming wiring OK.
+- `AGENTS.md` fully rewritten (was stale/fictional file tree): accurate code map, three-gate architecture, coding rules incl. "structured over prose" principle, validation gates, prompt work rules.
+
+## 2026-11-02 11:25 IST (05:55 UTC) — Evaluated prompt deployed live + offline CI gate
+
+- Live prompt is now the evaluated build: `src/lib/instructions/improved-v1.ts` (ported from the agent-eval variant, prod header), wired through `atlas-prompt.ts`; legacy `instructions/index.ts` kept only for `ATLAS_INSTRUCTION_EXAMPLES`. Render verified byte-identical to the validated prompt (15,283 chars).
+- Four tool files redeployed from variant-improved (`tools/{speak,start-new-chat,shutdown,open-camera}.ts` — redesigned descriptions/result texts, batched-terminal-round speak semantics). `registry.ts` untouched.
+- `model.ts`: `DEFAULT_MAX_REPLY_TOKENS` 1_200 → 3_000; finish-reason "length" repair now asks the model to redo the cut-off call in one piece with tools still enabled (was force-speak, which discarded finished card work).
+- `chat-message.ts` `trimHistory` hysteresis: under budget → passthrough byte-identical (cache-prefix stability); on overflow → re-cut to 60% target via new `keepPairs` helper; newest pair always kept; oversized pair clipped. Tests caught and fixed a nested-`unshift` bug in the clip path.
+- New offline test suite (no network/keys): `tests/prompt-regression.test.js` (prompt invariants, forbidden legacy lines, tool surfaces via `ORB_TOOLS`), `tests/history-hysteresis.test.js` — 20 pass / 0 fail. Note: tests are `.js` because `bun:test` has no type declarations here.
+- CI added (`.github/workflows/ci.yml`): install → lint → typecheck → test; live model checks stay out of CI (see `scripts/eval/README.md` gate policy). Live eval kit vendored under `scripts/eval/` (`HARNESS_APP` defaults to this repo; output `scripts/eval/runs/<label>/`); package scripts `test` and `eval:live` added.
+- Verified: prompt byte-check ✔, `bun test` 20/20 ✔, `bun run typecheck` clean ✔. `bun run lint` clean on all assistant-touched files; remaining failures are pre-existing (`public/mediapipe/**` vendored JS, user WIP `src/components/**`, `src/lib/tools/registry.ts` WIP warning).
+
+## 2026-11-02 11:30 IST (06:00 UTC) — Fabrication-claim check removed
+
+- Deleted `ACTION_CLAIM_PATTERNS`, `matchesActionClaim`, and the `!actionsRan` gate branch. `validateSpeechClaim` now checks tool-call syntax + Markdown only. Unwound all dead `actionsRan`/`roundActionsRan` plumbing through `runSpeak`, registry dispatch/execute/runToolWithSources, `runRequest`, `executeNativeCalls`, and `endWithContent` — except the loop-local streak tracking the speak-then-act continuation needs.
+- Tradeoff, stated plainly: false claims ("I'll put it on screen" with no cards) are now spoken as-is with no repair round. Markdown and tool-markup utterances are still withheld.
+- Verified: `tsc` clean, oxlint clean.
+
+## 2026-11-02 11:15 IST (05:45 UTC) — Action-claim patterns rewritten readably
+
+- Six dense regexes in `speech-integrity.ts` became named constants (`I_DID_LOOKUP`, `SOURCE_TOLD_ME`, `ON_SCREEN`, `I_MADE_SOMETHING`, `I_WILL_PUT_ON_SCREEN`, `I_ALREADY_PUT_ON_SCREEN`) with match/skip examples in the doc comment. Behavior proven identical via differential test against the originals on 42 fixtures.
+- Verified: `tsc` clean, oxlint clean.
+
+## 2026-11-02 11:00 IST (05:30 UTC) — Group-based typo training, no memorized examples
+
+- Removed all hardcoded typo examples (turn examples + the quoted list). New rule teaches the METHOD: sound it out ignoring missing/swapped/extra letters, match farewell/camera/fresh-start groups, act exactly as the clean phrase. Plus final-check step 0: sound out typo-filled input first, then run the checks.
+- Fresh-typo live results: new chatt ✓, goodby → shutdown ✓, cemra on → open_camera ✓ (after step 0); shuttup, opn camra, rest chat still answer in text. Per-input variance dominates now — same intent flips between runs, so further wording tweaks show diminishing returns.
+
+## 2026-11-02 10:45 IST (05:15 UTC) — Typo tool-calling fixed via prompt only
+
+- Fallback code fully reverted (no remnants, `tsc` clean). Prompt-only hardening instead: "Speech has no side effects" hard-error rule, "Always call it — never just say it in speech alone" on all three action tools, typo turn examples (shudup/cemra/chta), and "a typo never changes the response: same tool calls as the clean phrase".
+- Live proof: shudup → shutdown, strat chta → start_new_chat (newSession true), opne cemra → open_camera (was 0/3 stable fail, now fires; clean phrase still fires).
+
+## 2026-11-02 10:30 IST (04:xx UTC) — Hard-probe sweep: typo rule works, conversational turns still text-first
+
+- 10 typo/slang probes: greeting/camera/time/timer/search/fetch all fire correct tools THROUGH typos ("opne the cemra" → open_camera, "serch latest bun relase" → websearch+create). Typo-tolerance rule works.
+- 4 failures, one family: shutup/newchat/slang-bye/howto answer in text ("Goodbye.", "New chat created.") with no tool call — model understands intent (it says the right words) but treats conversational turns as text-first. Newchat is functionally broken (claims created, nothing resets).
+- Gate extended: past-tense screen claims ("I've put it on screen") + generic `<tag>` pseudo-markup in speech now withheld with repair; verified 7/7 unit checks.
+- Added typo-tolerance rule to ATLAS_CONVERSATION with worked examples.
+
+## 2026-11-02 10:15 IST (04:45 UTC) — shutdown tool stops voice after goodbye
+
+- New `shutdown` tool (`tools/shutdown.ts`, registry, trace `Shutting/Shut down`, terminal call, policy line): on "shut up / stop listening / end the conversation" the model calls it and speaks a short goodbye first — the client ends the mic only after the reply fully finishes (`aiState` idle/error), never mid-speech, via the existing `endConversation` path.
+- Verified: `tsc` clean, oxlint clean, registry/parse/dispatch/trace checks pass.
+
+## 2026-11-02 10:05 IST (04:35 UTC) — Speak-ends-turn rule in prompt
+
+- Wire showed the model speaking ("opening your camera") without calling `open_camera`. The prompt said "call speak last" but never stated the mechanism. `speak` tool description (native tools payload, weighed highest at decision time) now says calling it ends the turn immediately with nothing running after, so all other tools go first. `ATLAS_FINAL_CHECK` repeats it.
+- Verified: `tsc` clean, rule present in both the native tool description and the rendered prompt.
+
+## 2026-11-02 09:55 IST (04:25 UTC) — Disability question replaces talk styles
+
+- `/start` step 5 is now "Your disability" (Blind or low vision / Deaf or hard of hearing / Non-speaking / Autistic / Mobility / Something else / Prefer not to say), single-select radio cards with the Vision/Signs/Calm helper tag, matching the reference look. Talk-style picks, skip, and review chips are gone; review shows an Access row.
+- `Onboarding`/`UserProfile` carry `disability` instead of `tones`; the system prompt renders it as an access need with a one-line adaptation guide. Old stored `tones` are ignored by the parser.
+- Verified: `tsc` clean, oxlint clean, `/start` 200 with "Step 1 of 5", dev server cache cleared + restarted after a stale-Turbopack false alarm.
+
+## 2026-11-02 09:50 IST (04:20 UTC) — Single fixed voice, voice step removed
+
+- Atlas speaks with one fixed voice (Skylar, `ATLAS_VOICE_ID` in `use-voice-preview.ts`); the "Pick my voice" step, six-voice catalog UI, and voice state are gone. Flow is now 5 steps (name/age/pace/tone/review), pace previews play in Skylar, onboarding always saves `skylar`.
+- Deleted the 15 non-Skylar sample MP3s (3 remain) and narrowed `generate-deepgram-voices.mjs` to Skylar × 3 paces. `DEEPGRAM_VOICES` API catalog and voice validation stay — provider contract, not UI.
+- Verified: `tsc` clean, oxlint clean (one pre-existing autocomplete warning), `/start` 200 showing "Step 1 of 5: Your name".
+
+## 2026-11-02 09:35 IST (04:05 UTC) — /start matches atlas look
+
+- Same shell: `GET STARTED` eyebrow, `Tell us about you.` display heading, lede, `Step X of 6` + bar progressbar, Back/Continue ink pills. Our 6 steps (name/age/voice/pace/tone/review) and logic untouched.
+- Shared styles in `step-ui.tsx` follow the reference (radio cards, headings, buttons); name field uses the reference input + hint; unused `AmbientBackdrop` deleted.
+- Verified: `tsc` clean, oxlint clean (only pre-existing label a11y warnings), `/start` serves 200 with all markers.
+
+## 2026-11-02 09:20 IST (03:50 UTC) — Home page mirrors /home/sky/Projects/atlas
+
+- Ported verbatim: pill header (orb logo, wheelchair/walker/dancer commuters, `Get Atlas` CTA with `data-cta-frame`/`data-cta-button`), hero STEPS list, `TeamSection`, full hands engine (`hands/geo,parts,press,scene,art,hand` + `hands-section`). Orb usages adapted to `ParticlesOrb` (same props).
+- Commute/dance/walker/cane/step keyframes appended to `globals.css`.
+- Removed replaced pieces: old header/nav/toggle (`header` rewritten; `mobile-nav`, `get-started-link` deleted), old scene (`character-section`, old `hands/*` deleted).
+- Verified: `tsc` clean, oxlint clean (only `<a>`-vs-`<Link>` warnings inherited from reference), `bun run build` green with `/` static, served home 200 with all section markers.
+
+## 2026-11-02 09:00 IST (03:30 UTC) — Orb favicon, open_camera tool, Threads to top corner
+
+- Favicon: new `public/assets/icons/favicon.svg` (110-dot fibonacci orb, sage→white on `#1b1f23`, sage ring), layout points at it, old `.ico` deleted.
+- New `open_camera` tool (`tools/open-camera.ts`, registry, trace `Opening/Opened camera`, terminal call, policy line): model calls it on explicit camera requests and speaks "Opening your camera". Client (`onToolRequest` in `use-orb-turn` → dashboard) opens the camera via the existing permission flow — permission is code's job, never the model's. If it never opens (denied/error/unsupported), a follow-up turn tells the model so it speaks "no permission — please allow camera permission".
+- Threads button moved out of the bottom row to a small absolute top-right pill (`text-[11px]`, safe-area aware); Ctrl+K entry unchanged.
+- Verified: `tsc` clean, oxlint clean, registry/parse/dispatch/trace checks pass, favicon SVG valid + served 200, dashboard 200.
+
+## 2026-11-02 08:50 IST (03:20 UTC) — Prerender block from headers() in root layout
+
+- `await headers()` in `RootLayout` blocked `/dashboard` prerendering (Next 16 flags cookie/header access outside Suspense). Removed the SSR cookie read; the layout is sync again. The inline pre-paint script alone applies the cookie/system theme before first paint, so no flash and no mismatch (`suppressHydrationWarning` stays).
+- Verified: `bun run build` succeeds with `/dashboard` prerendered static, `tsc` clean.
+
+## 2026-11-02 08:40 IST (03:10 UTC) — Storage migrated to Dexie (IndexedDB), zero legacy
+
+- No localStorage/sessionStorage anywhere in `src` (verified by grep); all storage caps removed (50 threads, 500 msgs, title/message char limits).
+- New `src/lib/db/`: `database.ts` (lazy `atlas` Dexie v1: `threads(id,updatedAt)`, `messages(id,threadId,[threadId+seq])`, `prefs(key)`), `threads.ts` (transactional save/delete, ordered load, active-thread pref), `prefs.ts` (get/set with false-on-failure).
+- `threads.ts` is pure helpers now; `onboarding.ts` save/load are async via prefs; theme is cookie-based (`theme.ts` + SSR class in `layout.tsx` + BroadcastChannel cross-tab); affinity id is a cookie; `use-orb-turn`/`start-flow` await the new APIs.
+- Dashboard hydrates from Dexie after mount, write-through on every mutation, sidebar list via `useLiveQuery` with props fallback.
+- Verified: 21/21 fake-indexeddb checks (CRUD, order, reopen, concurrent, cascade delete, prefs, onboarding, unavailable-IDB), `tsc` clean, oxlint clean, dashboard 200.
+
+## 2026-11-02 08:20 IST (02:50 UTC) — Chats turns panel removed
+
+- Removed the `Chats` button, `HistoryPanel` (`history-panel.tsx` deleted), and its Ctrl+K entry. Turns are viewed via the active thread's cards; past threads live in the Threads drawer.
+
+## 2026-11-02 08:15 IST (02:45 UTC) — + New chat button removed from main row
+
+- Removed the prominent `+ New chat` pill from the dashboard controls row. Manual creation still available via the Threads drawer's `New chat` button and the Ctrl+K `New chat` command (both use the same `startThread`), plus the `start_new_chat` voice tool.
+
+## 2026-11-02 08:10 IST (02:40 UTC) — start_new_chat wording simplified
+
+- Dropped the confusing mechanics from the `start_new_chat` policy (`rules.ts`), tool description, and runner reply: now just "call it and speak a short confirmation like 'New chat created'". The when-not-to-use guard (no topic changes, fail-closed when unsure) stays. Card-dropping on reset turns is still enforced in `model.ts` code, just no longer spelled out in prose.
+
+## 2026-11-02 08:05 IST (02:35 UTC) — ChatGPT-style threads with + button
+
+- New `src/lib/threads.ts`: `ChatThread` (id/title/messages/createdAt/updatedAt), `createThread`, `threadTitleFor` (first user line, 60 chars), `loadThreads` (validates + sanitizes, migrates the legacy single `history` key once, always returns an active thread), `persistThreads` (shrinking retries). Caps: 50 threads, 500 messages each.
+- New `ThreadSidebar` (`src/components/dashboard/thread-sidebar.tsx`): Base UI left drawer (same pattern as mobile-nav) with a prominent `+ New chat` button, thread rows (title, time-ago, message count, active highlight, hover delete), device-storage footer. Non-modal so the mic keeps running.
+- `dashboard-flow.tsx`: threads + activeId state with ref mirrors and one `storeThreads` writer; `history`/`setHistory` derived per active thread so `useOrbTurn` is unchanged; `+ New chat` / `Threads (N)` buttons in the controls row; Ctrl+K entries; old `history`-key reader removed. `start_new_chat` now opens a fresh thread via `onNewSession` instead of wiping — old thread kept in the list. Tool/prompt wording updated to match.
+- Verified: `tsc` clean, oxlint clean on touched files, `bun -e` thread store checks (title, truncation, persist round-trip, legacy migration) pass, dashboard serves 200 with the new buttons in SSR markup.
+
+## 2026-11-02 07:35 IST (02:05 UTC) — History toggle not opening (reported)
+
+- Verified the route serves 200 with the `Chats` button and `dashboard-history` markup in the HTML, so the code is live on the dev server — likely a stale tab or the panel opening below the fold unseen.
+- `dashboard-flow.tsx`: opening the panel now smooth-scrolls it into view, and the toggle shows a pressed state (`border-sage text-ink`, `aria-pressed`) so the click is visibly acknowledged.
+- Verified: `tsc --noEmit` exit 0, oxlint clean on both touched files (pre-existing warnings only).
+
+## 2026-11-02 07:32 IST (02:02 UTC) — Chat history panel on the dashboard
+
+- New `HistoryPanel` (`src/components/dashboard/history-panel.tsx`): inline aside down below the orb controls showing past turns oldest-first with newest pinned at the bottom, You/Atlas labels, timestamps, card titles, and tool traces; renders the last 100 with a count note, empty state, and Clear/Close actions. Non-modal, so mic/VAD/cards keep running.
+- `dashboard-flow.tsx`: `historyOpen` state, `Chats (N)` toggle button beside the camera buttons (`aria-expanded`/`aria-controls`), `clearHistory` (empties history, closes open card, persists via the existing effect), Ctrl+K "Show/Hide chat history" command entry, and the panel section with bottom clearance for the fixed chatbox.
+- Verified: `tsc --noEmit` exit 0, oxlint clean on both touched files.
+
+## 2026-11-02 07:27 IST (01:57 UTC) — start_new_chat tool built
+
+- New `start_new_chat` tool (`src/lib/tools/start-new-chat.ts`): optional `reason` (capped 200), runner returns `newSession: true`. Wired into `ORB_TOOL_NAMES` (`types.ts`), `ORB_TOOLS`/`ARG_LIMITS`/`dispatchTool` (`registry.ts`), and barrel (`index.ts`), so `renderToolPrompt` lists it and prompt/runtime are back in sync.
+- Turn loop (`model.ts`): `TurnState`/`OmniTurn` carry `newSession`, terminal `create/start_new_chat/speak` rounds end the turn, reset turns drop cards+sources (speak-only enforcement), `reason` flows to the tool trace.
+- Transport (`turn-stream.ts`, `respond/route.ts`): final `speaking` event carries optional `newSession: true`; old frames without it still parse.
+- Client (`tool-trace.ts`, `use-orb-turn.ts`): `Started new chat` trace label (reason stored, label stays short); reveal replaces history with just this `[user, assistant]` pair so `persistHistory` overwrites `localStorage` and old cards disappear.
+- Verified: `tsc --noEmit` exit 0, oxlint clean on touched files (one pre-existing `no-base-to-string` warning in `registry.ts:350`), `bun -e` checks for registry/parse/dispatch/cap/trace/NDJSON round-trip all pass.
+
+## 2026-11-02 07:23 IST (01:53 UTC) — start_new_chat tool policy
+
+- `ATLAS_TOOL_POLICY` in `src/lib/instructions/rules.ts:6` now documents `start_new_chat`: use on explicit fresh-start requests (new session/chat, start over/fresh, clear history, forget conversation, reset), once per turn with optional reason then `speak` last, speak-only no cards; never on topic change/follow-up/card fix, never twice, fail-closed when unsure.
+- Note: policy mentions the tool before registry implementation (`ORB_TOOL_NAMES` in `src/lib/tools/types.ts:11` has no `start_new_chat` yet), so prompt/runtime are intentionally out of sync until the tool is built.
+- Verified: tsc clean for the file, oxlint clean for the file (repo-wide lint still fails on generated `public/mediapipe` warnings).
+
+## 2026-11-02 02:00 IST (20:30 UTC) — Hand-landmarker playground on the test console
+
+- New Hands tab on `/test` (`src/app/test/hand-client.tsx`): live camera + MediaPipe HandLandmarker (VIDEO mode, 2 hands) with the 21-point skeleton drawn on a canvas overlay, handedness + confidence readout, same mic-style status machine (idle/loading/live/denied/error). Test-only; nothing in the translator flow changed.
+- Self-hosted runtime in `public/mediapipe/` (7.8 MB `hand_landmarker.task` + SIMD/no-SIMD WASM, ~35 MB total): new `scripts/fetch-mediapipe-assets.mjs` copies WASM from the npm package and downloads the model once; chained into `postinstall` next to the VAD asset copy.
+- Verified: typecheck + lint clean, production build succeeds. Live camera check left to a real browser: open `/test` → Hands → Enable camera, show a hand, watch the skeleton track.
+
+## 2026-11-02 01:45 IST (20:15 UTC) — Best-reading bias restores all three sign reads
+
+- Rules section now prefers the best reading of ambiguous signing (UNCLEAR only when nothing at all is readable; never invent without visible basis). Re-ran all three clips: 11_11_21 → "I love you", 11_11_42 → "I love you" (flipped back), 11_40_10 → "I love" (partial — ME + LOVE visible, YOU not clear). All match the known content.
+- Verified: typecheck + lint clean.
+
+## 2026-11-02 01:35 IST (20:05 UTC) — Sign retest: expanded lexicon flips clip 2 to UNCLEAR
+
+- Re-ran all three clips on the 39,500-char reference prompt: 11_11_21 → "Transcription: I love you" (now with fingerspelling detail: signs I, crossed-arms LOVE, points YOU); 11_11_42 → UNCLEAR (was "Love you"/"You are loved" before — the stricter "never invent / indicate unclear" rules made the model conservative on ambiguous gesturing); 11_40_10 → UNCLEAR (unchanged, blurry/backlit).
+- Prompt tokens now ~10.5–11.3k per call.
+
+## 2026-11-02 01:20 IST (19:50 UTC) — Sign lexicon gains thinking/knowing, deaf/hearing, seeing, travel, describing sections
+
+- Appended five subsections to the Common ASL Sign Recognition Reference (KNOW through BELIEVE, DEAF/HEARING/HEAR, SEE/LOOK AT/WATCH, VISIT/TRAVEL/FIND, GOOD/BAD/HAVE). Prompt now 35,394 chars; send cap raised to 40,000. Single source still feeds both the transcriber and the test page.
+- Verified: contract intact, typecheck + lint clean. Token cost now ~11k per call.
+
+## 2026-11-02 01:10 IST (19:40 UTC) — Sign prompt replaced with full ASL reference in parts
+
+- `src/lib/sign-prompt.ts` holds the user's full ASL reference as 7 named parts (role, A–Z fingerspelling, recognition parameters, the new Common ASL Sign Recognition Reference lexicon, fingerspelling rules, recognition rules, output) joined into `DEFAULT_SIGN_PROMPT` (31,405 chars). `sign-video.ts` imports + re-exports it (cap raised to 32,000); the test client imports it too — mirror const deleted, single source. Output keeps the `Transcription:` last-line + UNCLEAR contract and the on-screen-text ignore rule.
+- Live verification on the three Downloads clips: 11_11_21 → "Transcription: I love you" (point-self + crossed-arms LOVE + point-viewer composed correctly); 11_11_42 → "Transcription: You are loved"; 11_40_10 → UNCLEAR (no clear lexical signs found). Prompt tokens now ~9.5k per call — the lexicon's accuracy-for-tokens trade.
+- Verified: typecheck + lint clean, production build succeeds.
+
+## 2026-11-02 00:50 IST (19:20 UTC) — Sign prompt replaced with full ASL reference, divided in parts
+
+- New `src/lib/sign-prompt.ts`: the user's full ASL reference as 7 named parts (role, fingerspelling A–Z, recognition parameters, common-signs lexicon, fingerspelling rules, recognition rules, output), joined into `DEFAULT_SIGN_PROMPT` (13,010 chars). `sign-video.ts` imports + re-exports it (routes unchanged) with the send cap raised 4,000 → 14,000; the test client imports it too — the duplicated mirror const is deleted, single source now.
+- Two adaptations flagged: output keeps the machine-readable `Transcription:` last line + UNCLEAR contract (the route parser depends on it), and the on-screen-text ignore rule is preserved (test videos have prominent background text).
+- Live verification on the three Downloads clips: 11_11_42 now transcribes "Love you" (was UNCLEAR — point + crossed-arms LOVE fired); 11_11_21 and 11_40_10 still UNCLEAR per the model (no clear lexical signs found). Prompt tokens roughly doubled (~4.8–5.6k vs ~2.7–3.5k) — accuracy for tokens trade.
+- Verified: typecheck + lint clean, production build succeeds.
+
+## 2026-11-01 22:25 IST (16:55 UTC) — Turn anatomy follows the cookbook agent-loop contract
+
+- Per the Meta basic-agent-loop recipe, `identity.ts` Turn anatomy is now receive → think → act → observe → evaluate: explicit done-criterion (cards created for material, then one approved `speak`; otherwise loop back) plus the remaining guards (90-second turn budget, user stop, no-repeat dedupe). No max-iteration rule re-added — that removal stands.
+- Verified: renders, typecheck and lint clean. Also noted: the file's Loop rules no longer carry the "never call speak in the same round" line — that predates this change (working-tree state), left untouched.
+
+## 2026-11-01 22:20 IST (16:50 UTC) — Chatbox attachments actually deliver files
+
+- Before, picking a file only pasted its name ("attached: x") into the message. Now the `File` travels: new `src/lib/attach-file.ts` validates (images + text only, 10 MB cap, audio/video/executables rejected with readable errors) and converts — images to downscaled JPEG data URLs, text inlined (12k chars, truncation marked).
+- `chatbox.tsx` carries the File, validates on pick with an inline error, passes it on send. `dashboard-flow.tsx sendTextWithMedia` routes images through the existing end-to-end `mediaFrames` path (same as sign stills; route already forwards them as `image_url` parts on text turns) and inlines text as an `[Attached file]` block; conversion failure aborts with a caption error.
+- Verified: typecheck + lint clean, validation matrix + truncation pass in bun, production build succeeds. Image canvas conversion needs a browser to exercise live.
+
+## 2026-11-01 22:10 IST (16:40 UTC) — Sign support scoped to ASL only
+
+- Prompt opening restored to "Transcribe the American Sign Language signing in this video." All other language references removed (BSL/Auslan/ISL alphabet comparison collapsed to "ASL fingerspells one-handed"), and the UNCLEAR rule now also covers non-ASL signing. Language-general knowledge kept (symmetry, transition-vs-content, pointing grammar, handshape pairs, depicting verbs, mouth patterns, non-manuals).
+- Verified: mirrors identical, typecheck and lint clean.
+
+## 2026-11-01 22:05 IST (16:35 UTC) — Sign prompt loaded with sign-language knowledge
+
+- `DEFAULT_SIGN_PROMPT` (mirrored in the test client) rewritten: generic "Transcribe the sign language in this video" opening instead of hardcoded ASL plus a decide-which-language clause; new knowledge added — two-handed symmetry/dominance conditions, transition-vs-content movement, pointing as pronoun grammar with verb agreement, A/S/C/G/D handshape minimal pairs, depicting verbs, mouth patterns, non-manual grammar, per-language manual alphabets.
+- Also fixed the prompt cap in `transcribeSigningVideo` (500 → 4000 chars): the old slice silently cut the prompt mid-sentence, so most of the detail never reached the model. New prompt is 3,510 chars, fully delivered. `Transcription:`-last + UNCLEAR contract unchanged, so the route parser is untouched.
+- Verified: mirrors identical, typecheck and lint clean. Live signing test still needed to confirm better reads.
+
+## 2026-11-01 21:55 IST (16:25 UTC) — Boundaries rule now refuses rather than informs
+
+- `rules.ts` medical/legal/financial line replaced: Atlas now says it is not qualified to give that type of advice (beyond it), the user must consult a qualified professional (a doctor for medical), and no general information as substitute. Old "give general information and point to" wording gone from the rendered prompt.
+- Verified: renders, typecheck and lint clean. Live-turn confirmation still pending (no API key here).
+
+## 2026-11-01 21:45 IST (16:15 UTC) — Final check gains speak-last rule
+
+- `rules.ts` final check adds item 7: call `speak` last — every search, fetch, and `create` first, then speak about the finished result. Matches the existing loop shape (a successful speak already ends the turn) and reinforces rule 19's create-before-speak order.
+- Verified: rule renders in the built system prompt, typecheck and lint clean. Live-turn confirmation still pending (no API key here).
+
 ## 2026-11-01 21:30 IST (16:00 UTC) — Prompt fix: guide-promise without cards was a wording loophole, not a code hole
 
 - The coffee wire (speak-only "here's a complete beginner-friendly guide...", zero `create` calls, turn finalized) passed all three `validateSpeechClaim` rules: plain text, no Markdown, no ACTION_CLAIM match. Code-gate approach started then reverted per direction: prompt problem, not code problem.

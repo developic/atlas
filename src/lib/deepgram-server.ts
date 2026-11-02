@@ -12,6 +12,15 @@ import {
   type DeepgramVoiceId,
 } from "@/lib/deepgram";
 import { OrbError } from "@/lib/orb-errors";
+import { stripNarrationLabel } from "@/lib/tts-integrity";
+
+/**
+ * TTS integrity boundary (see `tts-integrity.ts`): narration labels are
+ * stripped at the provider edge, in both `synthesizeSpeech` and
+ * `synthesizeSpeechStream`, so both encodings (MP3 preview and streamed PCM)
+ * enforce the same contract. An utterance that is only narration is simply
+ * not synthesized.
+ */
 
 const DEEPGRAM_API_URL = "https://api.deepgram.com/v1/speak";
 const TIMEOUT_MS = 60_000;
@@ -107,7 +116,11 @@ export async function synthesizeSpeech(
   text: string,
   options: DeepgramOptions = {},
 ): Promise<ArrayBuffer> {
-  const response = await postSpeak(text, options, "mp3");
+  const response = await postSpeak(
+    stripNarrationLabel(text),
+    options,
+    "mp3",
+  );
 
   return response.arrayBuffer();
 }
@@ -124,7 +137,14 @@ export async function* synthesizeSpeechStream(
   text: string,
   options: DeepgramOptions = {},
 ): AsyncGenerator<Uint8Array> {
-  const response = await postSpeak(text, options, "linear16");
+  const speakableText = stripNarrationLabel(text);
+
+  // Nothing speakable stays nothing to synthesize: the stream ends without a
+  // provider call, so the turn closes with audio-done and the client falls
+  // back gracefully — an all-narration sentence never reaches the provider.
+  if (!speakableText) return;
+
+  const response = await postSpeak(speakableText, options, "linear16");
   const pcm = stripWavHeader(new Uint8Array(await response.arrayBuffer()));
 
   if (pcm.byteLength === 0) {

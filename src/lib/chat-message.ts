@@ -1,9 +1,9 @@
 /**
  * Shared text-only conversation contract.
  *
- * The dashboard validates its `localStorage` history with this, and the orb
- * route validates the `history` field with the same helper. Keeping one copy
- * means the client and server cannot drift on what a stored turn looks like.
+ * The dashboard validates its stored threads with this, and the orb route
+ * validates the `history` field with the same helper. Keeping one copy means
+ * the client and server cannot drift on what a stored turn looks like.
  */
 import { isCardContent, joinCardMarkdown, MAX_CARDS, type CardContent } from "./cards";
 import type { SourceLink } from "./source-links";
@@ -24,18 +24,21 @@ export type ChatMessage = {
   timestamp?: number;
 };
 
-/**
- * One per-message cap for both the stored session and the request body.
- *
- * Big enough that legit cards never clip, small enough that one giant paste
- * cannot evict the rest of the session from the token budget below.
- */
-export const MAX_MESSAGE_CHARS = 50_000;
-
 /** What the model receives: text only, never ids, timestamps, or sources. */
 export type ModelHistoryMessage = Pick<ChatMessage, "role" | "content" | "speak">;
 
 const DEFAULT_HISTORY_TOKENS = 100_000;
+
+/**
+ * Hysteresis for the cache prefix. Baseten caches the token prefix, so a
+ * history window must stay byte-stable between sends to keep cache hits from
+ * extending beyond the static system prompt. While the history fits the
+ * budget it is passed through untouched. When it overflows, the window is
+ * cut back to this share of the budget instead of to the budget edge, so the
+ * re-trimmed window grows through several turns before another cut is due —
+ * only the rarer overflow crossings restart the prefix.
+ */
+const TRIM_TARGET_RATIO = 0.6;
 
 /** Rough token estimate for budgeting; the provider counts exactly. */
 export function estimateTokens(chars: number): number {
@@ -106,12 +109,57 @@ function messageSize(message: ChatMessage) {
 }
 
 /**
+ * Walk pairs newest → oldest, keeping what fits `budgetTokens`; the newest
+ * pair always stays, and a single pair larger than the whole budget is
+ * clipped to `clipTokens` so the model still sees the shape of the exchange.
+ * Returns the kept messages plus whether trimming occurred at all.
+ */
+function keepPairs(
+  pairs: ChatMessage[][],
+  budgetTokens: number,
+  clipTokens: number,
+): { kept: ChatMessage[]; trimmed: boolean } {
+  const kept: ChatMessage[] = [];
+  let totalTokens = 0;
+
+  for (let index = pairs.length - 1; index >= 0; index -= 1) {
+    const pair = pairs[index];
+    const size = pair.reduce((sum, message) => sum + messageSize(message), 0);
+    const tokens = estimateTokens(size);
+
+    if (kept.length > 0 && totalTokens + tokens > budgetTokens) {
+      return { kept, trimmed: true };
+    }
+
+    if (kept.length === 0 && tokens > clipTokens) {
+      const share = Math.max(1, Math.floor((clipTokens * 4) / pair.length));
+
+      kept.unshift(
+        ...pair.map((message) => ({
+          ...message,
+          content: message.content.slice(0, share),
+          ...(message.speak ? { speak: message.speak.slice(0, share) } : {}),
+        })),
+      );
+      return { kept, trimmed: true };
+    }
+
+    kept.unshift(...pair);
+    totalTokens += tokens;
+  }
+
+  return { kept, trimmed: false };
+}
+
+/**
  * Keep the newest turns within a token budget, without separating a user
  * message from the assistant reply it belongs to.
  *
- * The oldest pair is dropped whole. If a single pair is larger than the budget,
- * it is included but each field is clipped, so the model still sees the shape
- * of the exchange.
+ * Untouched history stays byte-identical so the provider's cached prompt
+ * prefix survives between sends. Only when the history overflows the budget
+ * is the window cut back — to a hysteresis target well under the budget, not
+ * to the budget edge — so the window grows through several turns before the
+ * next regeneration breaks the prefix again.
  */
 export function trimHistory(
   messages: ChatMessage[],
@@ -132,44 +180,24 @@ export function trimHistory(
     }
   }
 
-  const kept: ChatMessage[][] = [];
+  const inBudget = keepPairs(pairs, maxTokens, maxTokens);
 
-  let totalTokens = 0;
-
-  for (let index = pairs.length - 1; index >= 0; index -= 1) {
-    const pair = pairs[index];
-    const size = pair.reduce((sum, message) => sum + messageSize(message), 0);
-    const tokens = estimateTokens(size);
-
-    if (kept.length > 0 && totalTokens + tokens > maxTokens) break;
-
-    if (kept.length === 0 && tokens > maxTokens) {
-      const share = Math.max(1, Math.floor((maxTokens * 4) / pair.length));
-
-      kept.unshift(
-        pair.map((message) => ({
-          ...message,
-          content: message.content.slice(0, share),
-          ...(message.speak
-            ? { speak: message.speak.slice(0, share) }
-            : {}),
-        })),
-      );
-    } else {
-      kept.unshift(pair);
-    }
-
-    totalTokens += tokens;
+  if (!inBudget.trimmed) {
+    return inBudget.kept;
   }
 
-  return kept.flat();
+  return keepPairs(
+    pairs,
+    Math.floor(maxTokens * TRIM_TARGET_RATIO),
+    maxTokens,
+  ).kept;
 }
 
 /**
  * Validate the `history` field (a JSON string or an array) into model turns.
  *
- * Invalid turns are dropped, `content` and `speak` share one cap, empty turns
- * are removed, and the newest pairs are kept within the token budget.
+ * Invalid turns are dropped, empty turns are removed, and the newest pairs
+ * are kept within the token budget, which is the only size limit.
  */
 export function parseHistory(
   value: unknown,
@@ -191,9 +219,9 @@ export function parseHistory(
     .filter(isChatMessage)
     .map((message) => ({
       role: message.role,
-      content: message.content.trim().slice(0, MAX_MESSAGE_CHARS),
+      content: message.content.trim(),
       ...(typeof message.speak === "string" && message.speak.trim()
-        ? { speak: message.speak.trim().slice(0, MAX_MESSAGE_CHARS) }
+        ? { speak: message.speak.trim() }
         : {}),
     }))
     .filter((message) => message.content.length > 0);

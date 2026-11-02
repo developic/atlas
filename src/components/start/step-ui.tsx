@@ -1,23 +1,17 @@
 import type { ReactNode, RefObject } from "react";
-import { ArrowLeft, ArrowRight } from "lucide-react";
-
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 /** Shared button look for the main action on every step. */
 export const PRIMARY_BUTTON_CLASS =
-  "h-12 flex-1 rounded-full text-base font-semibold shadow-[0_12px_28px_-16px_rgba(62,106,94,0.85)] transition-[box-shadow,transform] hover:shadow-[0_16px_32px_-14px_rgba(62,106,94,0.7)] disabled:shadow-none";
-
-const ARROW_CLASS =
-  "size-4 transition-transform duration-200 group-hover/button:translate-x-0.5";
+  "inline-flex min-h-12 flex-1 items-center justify-center rounded-full bg-ink px-6 text-base font-bold text-white sm:flex-none sm:px-8";
 
 /** Shared surface motion for the radio/checkbox option cards. */
 export const OPTION_MOTION_CLASS =
-  "transition-[background-color,border-color,box-shadow,color,transform] duration-200 ease-out hover:-translate-y-0.5 hover:bg-sage-wash/50 hover:shadow-[0_14px_30px_-26px_rgba(62,106,94,0.8)] peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-ring active:translate-y-0 active:scale-[0.99]";
+  "transition-colors peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-ring";
 
-export const OPTION_IDLE_CLASS = "border-line bg-sand text-ink-muted";
-export const OPTION_ACTIVE_CLASS =
-  "border-sage/70 bg-sage-wash text-sage-text shadow-[0_16px_34px_-26px_rgba(62,106,94,0.8)]";
+export const OPTION_IDLE_CLASS = "border-line bg-paper text-ink";
+export const OPTION_ACTIVE_CLASS = "border-sage-text bg-sage-wash/60 text-ink";
 
 export const INDICATOR_CLASS =
   "flex shrink-0 items-center justify-center rounded-full border transition-colors";
@@ -31,26 +25,26 @@ type StepHeadingProps = {
 
 export function StepHeading({ children, headingRef }: StepHeadingProps) {
   return (
-    <h1
+    <h2
       ref={headingRef}
       tabIndex={-1}
-      className="font-mono text-[clamp(1.75rem,6vw,2.5rem)] leading-[1.1] font-bold tracking-[-0.04em] text-ink focus:outline-none"
+      className="mt-8 font-display text-2xl font-semibold tracking-tight text-ink focus-visible:outline-none"
     >
       {children}
-    </h1>
+    </h2>
   );
 }
 
 export function StepLede({ children }: { children: ReactNode }) {
   return (
-    <p className="mt-3 font-mono text-sm leading-relaxed text-ink-muted sm:text-base">
+    <p className="mt-3 text-base leading-relaxed text-ink-muted">
       {children}
     </p>
   );
 }
 
 export function NextButton({
-  label = "Next",
+  label = "Continue",
   disabled = false,
   className,
 }: {
@@ -65,22 +59,19 @@ export function NextButton({
       className={cn(PRIMARY_BUTTON_CLASS, className)}
     >
       {label}
-      <ArrowRight aria-hidden="true" className={ARROW_CLASS} />
     </Button>
   );
 }
 
 export function BackButton({ onClick }: { onClick: () => void }) {
   return (
-    <Button
+    <button
       type="button"
-      variant="outline"
       onClick={onClick}
-      className="h-12 rounded-full px-5"
+      className="inline-flex min-h-12 items-center justify-center rounded-full border border-line bg-paper px-6 text-base font-bold text-ink"
     >
-      <ArrowLeft aria-hidden="true" className="size-4" />
       Back
-    </Button>
+    </button>
   );
 }
 
@@ -93,7 +84,7 @@ export function StepActions({
   children: ReactNode;
 }) {
   return (
-    <div className="mt-4 flex gap-2">
+    <div className="mt-8 flex items-center gap-3">
       <BackButton onClick={onBack} />
       {children}
     </div>

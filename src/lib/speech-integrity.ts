@@ -1,11 +1,10 @@
 /**
  * The final-response integrity gate for speech.
  *
- * Three text-only checks, no execution ids involved: tool-call JSON arriving
- * as text is rejected outright, Markdown or code formatting is withheld
- * (TTS reads it literally), and a claim that an action ran when none did is
- * fabrication. Everything here is phrased as a model-readable reason so the
- * turn can repair instead of silently speaking a bad utterance.
+ * Two text-only checks, no execution ids involved: tool-call syntax arriving
+ * as text is rejected outright, and Markdown or code formatting is withheld
+ * (TTS reads it literally). Everything here is phrased as a model-readable
+ * reason so the turn can repair instead of silently speaking a bad utterance.
  */
 
 /**
@@ -28,26 +27,21 @@ export function looksLikeMarkdown(text: string): boolean {
 }
 
 /**
- * Phrases that assert an action (search, fetch, read, screen presence)
- * happened. Tight by intent: a false positive only costs one repair round,
- * so these stay narrow enough to skip future/imperative phrasing such as
- * "you can check the docs" or "let me look that up".
+ * Tool-call serialization that arrived as text instead of calls. Shared with
+ * the turn loop's final sweep (`model.ts`) so the leak contract lives in one
+ * place: speech text must never be tool-call syntax or leaked tool results.
  */
-export const ACTION_CLAIM_PATTERNS: readonly RegExp[] = [
-  /\bi\b\s*(?:already\s+|just\s+|have\s+|'ve\s+|'d\s+)?(?:searched|looked(?: it)?\s+up|fetched|scraped|checked|verified)\b/i,
-  /\b(?:the\s+)?(?:web\s+)?(?:search|lookup|fetch|page|results?)\s+(?:said|says|showed|shows|returned|came back|confirmed)\b/i,
-  /\b(?:on|in)\s+(?:your|the)\s+screen\b/i,
-  /\b(?:created|added|saved|built|generated|put together)\s+(?:a|the|your|this|another)\s+(?:new\s+)?(?:card|timer|list|table|summary|note|breakdown)\b/i,
-];
-
-export function matchesActionClaim(text: string): boolean {
-  return ACTION_CLAIM_PATTERNS.some((pattern) => pattern.test(text));
-}
-
-function looksLikeToolCallJson(text: string): boolean {
+export function looksLikeToolCall(text: string): boolean {
   const trimmed = text.trim();
 
-  return trimmed.startsWith('{"tool"') || trimmed.startsWith('[{"tool"');
+  return (
+    trimmed.startsWith('{"tool"') ||
+    trimmed.startsWith('[{"tool"') ||
+    trimmed.startsWith("<atem:function_calls") ||
+    trimmed.startsWith("<invoke") ||
+    trimmed.startsWith("<function") ||
+    /<[a-zA-Z][^<>\n]*>/.test(trimmed)
+  );
 }
 
 export type ClaimVerdict = { ok: true } | { ok: false; reason: string };
@@ -58,12 +52,10 @@ export type ClaimVerdict = { ok: true } | { ok: false; reason: string };
  */
 export function validateSpeechClaim({
   text,
-  actionsRan,
 }: {
   text: string;
-  actionsRan: boolean;
 }): ClaimVerdict {
-  if (looksLikeToolCallJson(text)) {
+  if (looksLikeToolCall(text)) {
     return {
       ok: false,
       reason:
@@ -76,14 +68,6 @@ export function validateSpeechClaim({
       ok: false,
       reason:
         "the utterance contains Markdown or code formatting, which is read aloud literally; put formatted content in a create card and speak only its plain-text companion",
-    };
-  }
-
-  if (!actionsRan && matchesActionClaim(text)) {
-    return {
-      ok: false,
-      reason:
-        "no actions ran in this turn, so nothing had to happen; answer without claiming that anything was executed",
     };
   }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 
 import { shouldRevealTurn, type RevealTrigger } from "@/components/dashboard/orb-reveal";
@@ -12,6 +12,14 @@ import {
   type ChatMessage,
 } from "@/lib/chat-message";
 import { loadOnboarding, parseProfile } from "@/lib/onboarding";
+import type { AccessMode } from "@/lib/access-modes";
+import { getCookie, setCookie } from "@/lib/cookies";
+import {
+  applyReminderDirectives,
+  buildReminderSnapshot,
+  currentTimeZone,
+} from "@/lib/reminder-scheduler";
+import { applyMoodDirectives, buildMoodSnapshot } from "@/lib/db/moods";
 import { toToolTrace, type ToolTrace } from "@/lib/tool-trace";
 import {
   MAX_WIRE_FRAMES,
@@ -47,19 +55,20 @@ const MAX_TURN_TOOLS = 6;
 const REQUEST_TURN_DEBUG = process.env.NODE_ENV !== "production";
 
 /**
- * One affinity id per browser session. Baseten routes requests that share it
- * to the same replica, so the system prompt and the growing history stay in
- * that replica's prompt cache and bill at the cached input rate.
+ * One affinity id per browser session, kept in a cookie so it survives
+ * reloads. Baseten routes requests that share it to the same replica, so the
+ * system prompt and the growing history stay in that replica's prompt cache
+ * and bill at the cached input rate.
  */
-const SESSION_KEY = "session";
+const AFFINITY_COOKIE = "atlas-affinity";
 
-function sessionId(): string | undefined {
+function affinityId(): string | undefined {
   try {
-    const existing = sessionStorage.getItem(SESSION_KEY);
+    const existing = getCookie(AFFINITY_COOKIE);
     if (existing) return existing;
 
     const id = crypto.randomUUID();
-    sessionStorage.setItem(SESSION_KEY, id);
+    setCookie(AFFINITY_COOKIE, id);
 
     return id;
   } catch {
@@ -85,6 +94,32 @@ type RunTurnOptions = {
 type UseOrbTurnOptions = {
   history: ChatMessage[];
   setHistory: Dispatch<SetStateAction<ChatMessage[]>>;
+  /**
+   * A `start_new_chat` turn opens a fresh thread instead of replacing the
+   * history in place. Without one, the turn falls back to replacing it.
+   */
+  onNewSession?: (
+    userMessage: ChatMessage | undefined,
+    assistantMessage: ChatMessage,
+  ) => void;
+  /**
+   * Fires for every tool the model calls, the moment the event streams in —
+   * before the turn ends. The dashboard uses it for client-side tools like
+   * `open_camera`, whose permission prompt only the browser can show.
+   */
+  onToolRequest?: (tool: string) => void;
+  /**
+   * Whether this mode may produce sound. Deaf mode turns it off, so the
+   * browser voice is never used and no audio clock is started; the reply is
+   * shown as text. Defaults to true (accessibility off).
+   */
+  speech?: boolean;
+  /** Selected access mode, sent with every turn so the server can enforce it. */
+  mode?: AccessMode | null;
+  /** Mute mode only: the user enabled spoken replies. */
+  voiceReplies?: boolean;
+  /** Whether the camera is live right now; the model must never guess. */
+  cameraOn?: boolean;
 };
 
 function wait(ms: number) {
@@ -123,6 +158,12 @@ function turnErrorMessage(error: unknown) {
 export function useOrbTurn({
   history,
   setHistory,
+  onNewSession,
+  onToolRequest,
+  speech = true,
+  mode = null,
+  voiceReplies = false,
+  cameraOn = false,
 }: UseOrbTurnOptions) {
   const abortRef = useRef<AbortController | null>(null);
   const streamedUserRef = useRef<string | null>(null);
@@ -136,6 +177,18 @@ export function useOrbTurn({
   const browserTokenRef = useRef(0);
   /** Tool rows already announced during this turn, newest last. */
   const toolsRef = useRef<ToolTrace[]>([]);
+  /** Latest props, so stable callbacks can find the current turn's user row. */
+  const historyRef = useRef(history);
+  const onNewSessionRef = useRef(onNewSession);
+  const onToolRequestRef = useRef(onToolRequest);
+  const speechRef = useRef(speech);
+
+  useEffect(() => {
+    historyRef.current = history;
+    onNewSessionRef.current = onNewSession;
+    onToolRequestRef.current = onToolRequest;
+    speechRef.current = speech;
+  }, [history, onNewSession, onToolRequest, speech]);
   const [aiState, setAiState] = useState<AiState>("idle");
   const [aiReply, setAiReply] = useState<string | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
@@ -194,31 +247,68 @@ export function useOrbTurn({
 
   const appendAssistant = useCallback(
     (event: SpeakingEvent) => {
-      const cards = event.cards ?? [];
+      // Authorized reminder mutations land in the store; the confirmation
+      // already rode the spoken reply, so this never blocks rendering.
+      void applyReminderDirectives(event.reminders ?? []).catch(() => undefined);
+      // Autism mode logs moods the same way: the entry is data, the reply
+      // already acknowledged it.
+      void applyMoodDirectives(event.moods ?? []).catch(() => undefined);
+
+      const cards = event.newSession ? [] : (event.cards ?? []);
       const content = (
         cards.length > 0 ? joinCardMarkdown(cards) : event.speak
       ).trim();
 
       if (!content && !event.speak) return;
 
+      const assistantMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: "assistant" as const,
+        content,
+        ...(event.speak ? { speak: event.speak } : {}),
+        ...(cards.length > 0 ? { cards } : {}),
+        ...(event.sources?.length && !event.newSession
+          ? { sources: event.sources.slice(0, 12) }
+          : {}),
+        ...(toolsRef.current.length
+          ? { tools: toolsRef.current.slice(-MAX_TURN_TOOLS) }
+          : {}),
+        timestamp: Date.now(),
+      };
+
+      // A reset turn opens a fresh thread through the handler, keeping the
+      // old thread in the list. Without a handler, replace the history in
+      // place so the next turn still starts fresh.
+      if (event.newSession) {
+        const handleNewSession = onNewSessionRef.current;
+
+        if (handleNewSession) {
+          const previous = historyRef.current;
+          const userId = streamedUserRef.current;
+          const userMessage = userId
+            ? previous.find((message) => message.id === userId)
+            : [...previous].reverse().find((message) => message.role === "user");
+
+          handleNewSession(userMessage, assistantMessage);
+          return;
+        }
+
+        setHistory((previous) => {
+          const userId = streamedUserRef.current;
+          const userMessage = userId
+            ? previous.find((message) => message.id === userId)
+            : [...previous].reverse().find((message) => message.role === "user");
+
+          return userMessage
+            ? [userMessage, assistantMessage].slice(-MAX_SESSION_MESSAGES)
+            : [assistantMessage];
+        });
+
+        return;
+      }
+
       setHistory((previous) =>
-        [
-          ...previous,
-          {
-            id: crypto.randomUUID(),
-            role: "assistant" as const,
-            content,
-            ...(event.speak ? { speak: event.speak } : {}),
-            ...(cards.length > 0 ? { cards } : {}),
-            ...(event.sources?.length
-              ? { sources: event.sources.slice(0, 12) }
-              : {}),
-            ...(toolsRef.current.length
-              ? { tools: toolsRef.current.slice(-MAX_TURN_TOOLS) }
-              : {}),
-            timestamp: Date.now(),
-          },
-        ].slice(-MAX_SESSION_MESSAGES),
+        [...previous, assistantMessage].slice(-MAX_SESSION_MESSAGES),
       );
     },
     [setHistory],
@@ -269,6 +359,27 @@ export function useOrbTurn({
     window.speechSynthesis.speak(utterance);
   }, []);
 
+  /**
+   * Blind mode hears failures, never reads them. This speaks the error without
+   * taking over the turn state: the caption still shows the message.
+   */
+  const announceError = useCallback((message: string) => {
+    if (mode !== "blind" || !speechRef.current) return;
+
+    const clean = message.trim();
+
+    if (!clean || typeof window === "undefined" || !("speechSynthesis" in window)) {
+      return;
+    }
+
+    try {
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(new SpeechSynthesisUtterance(clean));
+    } catch {
+      // The caption still carries the message.
+    }
+  }, [mode]);
+
   /** The single reset every turn and every cancel uses. */
   const resetTurn = useCallback(
     (state: AiState = "idle") => {
@@ -306,6 +417,9 @@ export function useOrbTurn({
    * turn's list so the finished reply can show what was fetched or searched.
    */
   const noteTool = useCallback((tool: string, detail?: string) => {
+    // Client-side tools act here, while the turn is still running.
+    onToolRequestRef.current?.(tool);
+
     const trace = toToolTrace(tool, detail);
 
     if (!trace) return;
@@ -424,6 +538,9 @@ export function useOrbTurn({
         if (echoTranscript) upsertUser(text);
       },
       onAudio: (pcm: string, sampleRate: number) => {
+        // Defensive: a silent mode never plays PCM even if a frame slips in.
+        if (!speechRef.current) return;
+
         receivedPcmRef.current = true;
 
         if (revealedRef.current) {
@@ -450,9 +567,20 @@ export function useOrbTurn({
         // browser say it instead of playing an MP3 download.
         const turn = finalTurnRef.current;
 
-        if (turn && !receivedPcmRef.current && revealPendingTurn("browser")) {
+        if (
+          turn &&
+          speechRef.current &&
+          !receivedPcmRef.current &&
+          revealPendingTurn("browser")
+        ) {
           speakWithBrowser(turn.speak);
+          return;
         }
+
+        // Silent mode: reveal the text without ever starting a voice, then
+        // complete the turn so the orb leaves "thinking".
+        revealPendingTurn("browser");
+        markPlaybackDone();
       },
       onSpeaking: (event: SpeakingEvent) => {
         finalTurnRef.current = event;
@@ -567,8 +695,10 @@ export function useOrbTurn({
         // has; show the reply and the error together.
         revealPendingTurn("error");
         stopPlayback();
-        setAiError(turnErrorMessage(error));
+        const message = turnErrorMessage(error);
+        setAiError(message);
         setAiState("error");
+        announceError(message);
         setWire((current) =>
           current
             ? {
@@ -589,7 +719,7 @@ export function useOrbTurn({
         }
       }
     },
-    [makeHandlers, resetTurn, revealPendingTurn, stopPlayback],
+    [announceError, makeHandlers, resetTurn, revealPendingTurn, stopPlayback],
   );
 
   const respond = useCallback(
@@ -624,15 +754,25 @@ export function useOrbTurn({
             ),
           );
 
-          const saved = loadOnboarding();
+          const saved = await loadOnboarding();
           if (saved?.voiceId) form.append("voice", saved.voiceId);
           if (saved?.pace) form.append("pace", saved.pace);
 
           const profile = parseProfile(saved);
           if (profile) form.append("profile", JSON.stringify(profile));
 
-          const affinity = sessionId();
+          form.append("reminders", JSON.stringify(await buildReminderSnapshot()));
+          // The mood log rides only in autism mode, where the tool exists.
+          const moods = mode === "autism" ? await buildMoodSnapshot() : [];
+          if (moods.length > 0) form.append("moods", JSON.stringify(moods));
+          const zone = currentTimeZone();
+          if (zone) form.append("timeZone", zone);
+
+          const affinity = affinityId();
           if (affinity) form.append("session", affinity);
+          if (mode) form.append("mode", mode);
+          if (mode === "mute" && voiceReplies) form.append("voiceReplies", "1");
+          if (cameraOn) form.append("cameraOn", "1");
           if (REQUEST_TURN_DEBUG) form.append("debug", "1");
 
           for (const frame of opts.mediaFrames ?? []) {
@@ -643,7 +783,7 @@ export function useOrbTurn({
         },
       });
     },
-    [runTurn],
+    [cameraOn, mode, runTurn, voiceReplies],
   );
 
   const sendText = useCallback(
@@ -652,7 +792,7 @@ export function useOrbTurn({
       if (!clean) return;
 
       // Resume the audio clock inside the submit gesture so the reply can play.
-      primePlayback();
+      if (speech) primePlayback();
 
       await runTurn({
         echoTranscript: false,
@@ -672,9 +812,11 @@ export function useOrbTurn({
             ].slice(-MAX_SESSION_MESSAGES),
           );
         },
-        buildBody: () => {
-          const saved = loadOnboarding();
+        buildBody: async () => {
+          const saved = await loadOnboarding();
           const profile = parseProfile(saved);
+          const zone = currentTimeZone();
+          const moods = mode === "autism" ? await buildMoodSnapshot() : [];
 
           return {
             headers: { "Content-Type": "application/json" },
@@ -689,14 +831,20 @@ export function useOrbTurn({
               voice: saved?.voiceId ?? undefined,
               pace: saved?.pace ?? undefined,
               ...(profile ? { profile } : {}),
-              session: sessionId(),
+              reminders: await buildReminderSnapshot(),
+              ...(moods.length > 0 ? { moods } : {}),
+              ...(zone ? { timeZone: zone } : {}),
+              ...(mode ? { mode } : {}),
+              ...(mode === "mute" && voiceReplies ? { voiceReplies: true } : {}),
+              ...(cameraOn ? { cameraOn: true } : {}),
+              session: affinityId(),
               ...(REQUEST_TURN_DEBUG ? { debug: true } : {}),
             }),
           };
         },
       });
     },
-    [history, primePlayback, runTurn, setHistory],
+    [cameraOn, history, mode, primePlayback, runTurn, setHistory, speech, voiceReplies],
   );
 
   /** Cancel the turn in flight and return the orb to idle. */
@@ -714,10 +862,14 @@ export function useOrbTurn({
   }, []);
 
   /** A local failure outside a turn, such as an unavailable voice pipeline. */
-  const failTurn = useCallback((message: string) => {
-    setAiError(message);
-    setAiState("error");
-  }, []);
+  const failTurn = useCallback(
+    (message: string) => {
+      setAiError(message);
+      setAiState("error");
+      announceError(message);
+    },
+    [announceError],
+  );
 
   /** Drop the last turn's wire capture without touching the conversation. */
   const clearWire = useCallback(() => setWire(null), []);

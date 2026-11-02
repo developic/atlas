@@ -5,9 +5,10 @@ import { ViewTransition } from "react";
 
 import { TestOrb } from "./orb-client";
 import { SignTest } from "./sign-client";
+import { HandTest } from "./hand-client";
 import { routeTransition } from "@/lib/view-transition";
 
-type Tab = "sign" | "orb";
+type Tab = "sign" | "hands" | "orb";
 
 /**
  * Test console: the signing-video transcription test plus the orb inspector.
@@ -25,6 +26,7 @@ export function TestConsole() {
             {(
               [
                 ["sign", "Sign video"],
+                ["hands", "Hands"],
                 ["orb", "Orb"],
               ] as [Tab, string][]
             ).map(([value, label]) => (
@@ -45,7 +47,13 @@ export function TestConsole() {
             ))}
           </div>
 
-          {tab === "sign" ? <SignTest /> : <TestOrb bare />}
+          {tab === "sign" ? (
+            <SignTest />
+          ) : tab === "hands" ? (
+            <HandTest />
+          ) : (
+            <TestOrb bare />
+          )}
         </section>
       </main>
     </ViewTransition>

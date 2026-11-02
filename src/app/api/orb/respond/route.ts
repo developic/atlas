@@ -6,6 +6,12 @@ import {
   type DeepgramVoiceId,
 } from "@/lib/deepgram";
 import {
+  capabilitiesFor,
+  isAccessMode,
+  isSpeechEnabled,
+  type AccessMode,
+} from "@/lib/access-modes";
+import {
   synthesizeSpeechStream,
 } from "@/lib/deepgram-server";
 import { parseHistory, type ChatMessage } from "@/lib/chat-message";
@@ -16,9 +22,14 @@ import {
   respondToText,
   type OmniTurn,
 } from "@/lib/model";
-import { parseSignFrames } from "@/lib/sign-frames";
+import { parseSignFrames } from "@/lib/media-frames";
 import { isOrbError, OrbError, userMessageFor } from "@/lib/orb-errors";
 import { MAX_TRANSCRIPT_CHARS, normalizeSpeech } from "@/lib/orb-turn";
+import {
+  parseReminderSnapshot,
+  type ReminderSnapshotItem,
+} from "@/lib/reminders";
+import { parseMoodSnapshot, type MoodSnapshotItem } from "@/lib/moods";
 import { createSentenceChunker } from "@/lib/sentence-chunker";
 import type { TurnEvent } from "@/lib/turn-stream";
 
@@ -35,8 +46,20 @@ type TurnInput = {
   pace?: DeepgramPace;
   /** Who Atlas is talking to, from `/start`; remembered via the prompt. */
   profile?: UserProfile;
+  /** Pending reminders from the client's store (capped, validated). */
+  reminderSnapshot: ReminderSnapshotItem[];
+  /** The private mood log, attached only in autism mode. */
+  moodSnapshot: MoodSnapshotItem[];
+  /** Whether the camera is live right now, so the model never guesses. */
+  cameraOn: boolean;
+  /** IANA time zone for wall-clock phrases ("tomorrow at 9am"). */
+  timeZone?: string;
   /** Stable per-conversation id; routes turns to one replica for prompt caching. */
   session?: string;
+  /** Selected accessibility mode; null keeps the existing behaviour. */
+  mode: AccessMode | null;
+  /** Mute only: the user turned voice replies on. */
+  voiceReplies: boolean;
   /** Ask the server to attach raw provider payloads (development only). */
   debug: boolean;
 };
@@ -84,6 +107,13 @@ export async function POST(request: Request) {
       try {
         const input = await readRequest(request);
 
+        if (input.audio && !capabilitiesFor(input.mode).microphone) {
+          throw new OrbError(
+            "validation",
+            "This access mode does not accept audio input.",
+          );
+        }
+
         if (!input.audio && !input.transcript) {
           throw new OrbError(
             "audio",
@@ -99,6 +129,9 @@ export async function POST(request: Request) {
           voice: input.voice,
           pace: input.pace,
         };
+        // Delivery is an application decision: deaf mode never reaches TTS,
+        // and mute mode only when the user enabled voice replies.
+        const speechEnabled = isSpeechEnabled(input.mode, input.voiceReplies);
         const chunker = createSentenceChunker();
         let audioChain = Promise.resolve();
         let sequence = 0;
@@ -108,7 +141,7 @@ export async function POST(request: Request) {
         const queueSentence = (sentence: string) => {
           const text = normalizeSpeech(sentence);
 
-          if (!text) return;
+          if (!text || !speechEnabled) return;
 
           audioChain = audioChain.then(async () => {
             if (ttsFailure || clientSignal.aborted) return;
@@ -181,13 +214,13 @@ export async function POST(request: Request) {
               input.mimeType,
               input.history,
               callbacks,
-              { signal: clientSignal, session: input.session, debug, profile: input.profile, ...media },
+              { signal: clientSignal, session: input.session, debug, mode: input.mode, profile: input.profile, reminderSnapshot: input.reminderSnapshot, moodSnapshot: input.moodSnapshot, cameraOn: input.cameraOn, timeZone: input.timeZone, ...media },
             )
           : await respondToText(
               input.transcript,
               input.history,
               callbacks,
-              { signal: clientSignal, session: input.session, debug, profile: input.profile, ...media },
+              { signal: clientSignal, session: input.session, debug, mode: input.mode, profile: input.profile, reminderSnapshot: input.reminderSnapshot, moodSnapshot: input.moodSnapshot, cameraOn: input.cameraOn, timeZone: input.timeZone, ...media },
             );
 
         if (!turn.speak) {
@@ -202,6 +235,9 @@ export async function POST(request: Request) {
           speak: turn.speak,
           ...(turn.cards.length > 0 ? { cards: turn.cards } : {}),
           ...(turn.sources.length > 0 ? { sources: turn.sources } : {}),
+          ...(turn.newSession ? { newSession: true as const } : {}),
+          ...(turn.reminders && turn.reminders.length > 0 ? { reminders: turn.reminders } : {}),
+          ...(turn.moods && turn.moods.length > 0 ? { moods: turn.moods } : {}),
           ...(turn.debug ? { debug: turn.debug } : {}),
         };
 
@@ -236,7 +272,7 @@ export async function POST(request: Request) {
             completionTokens: turn.meta.completionTokens,
             reasoningTokens: turn.meta.reasoningTokens,
             toolRounds: turn.meta.toolRounds,
-            audio: pcmSent ? "pcm" : "browser",
+            audio: speechEnabled ? (pcmSent ? "pcm" : "browser") : "off",
           }),
         );
       } catch (error) {
@@ -306,7 +342,13 @@ async function readRequest(request: Request): Promise<TurnInput> {
       voice?: unknown;
       pace?: unknown;
       profile?: unknown;
+      reminders?: unknown;
+      moods?: unknown;
+      cameraOn?: unknown;
+      timeZone?: unknown;
       session?: unknown;
+      mode?: unknown;
+      voiceReplies?: unknown;
       debug?: unknown;
     };
 
@@ -322,7 +364,13 @@ async function readRequest(request: Request): Promise<TurnInput> {
       voice: isDeepgramVoiceId(body.voice) ? body.voice : undefined,
       pace: isDeepgramPace(body.pace) ? body.pace : undefined,
       profile: parseProfile(body.profile),
+      reminderSnapshot: parseReminderSnapshot(body.reminders),
+      moodSnapshot: parseMoodSnapshot(body.moods),
+      cameraOn: body.cameraOn === true,
+      timeZone: readTimeZone(body.timeZone),
       session: readSession(body.session),
+      mode: readMode(body.mode),
+      voiceReplies: body.voiceReplies === true,
       debug: body.debug === true,
     };
   }
@@ -337,6 +385,12 @@ async function readRequest(request: Request): Promise<TurnInput> {
   const session = readSession(form.get("session"));
   const debug = form.get("debug") === "1";
   const profile = parseProfile(safeJson(form.get("profile")));
+  const reminderSnapshot = parseReminderSnapshot(safeJson(form.get("reminders")));
+  const moodSnapshot = parseMoodSnapshot(safeJson(form.get("moods")));
+  const cameraOn = form.get("cameraOn") === "1";
+  const timeZone = readTimeZone(form.get("timeZone"));
+  const mode = readMode(form.get("mode"));
+  const voiceReplies = form.get("voiceReplies") === "1";
   const preferences = {
     voice: isDeepgramVoiceId(voice) ? voice : undefined,
     pace: isDeepgramPace(pace) ? pace : undefined,
@@ -355,6 +409,12 @@ async function readRequest(request: Request): Promise<TurnInput> {
       session,
       debug,
       profile,
+      reminderSnapshot,
+      moodSnapshot,
+      cameraOn,
+      timeZone,
+      mode,
+      voiceReplies,
       ...preferences,
     };
   }
@@ -372,6 +432,12 @@ async function readRequest(request: Request): Promise<TurnInput> {
     session,
     debug,
     profile,
+    reminderSnapshot,
+    moodSnapshot,
+    cameraOn,
+    timeZone,
+    mode,
+    voiceReplies,
     ...preferences,
   };
 }
@@ -383,6 +449,25 @@ async function readRequest(request: Request): Promise<TurnInput> {
  */
 function readSession(value: unknown): string | undefined {
   return normalizeSession(typeof value === "string" ? value : undefined);
+}
+
+/**
+ * The client's selected access mode. Anything unrecognized (including the
+ * retired `standard` id) is treated as accessibility off, never guessed.
+ */
+function readMode(value: unknown): AccessMode | null {
+  return isAccessMode(value) ? value : null;
+}
+
+/**
+ * The client's IANA time zone for wall-clock reminder phrases. Anything that
+ * is not a short zone-shaped string is dropped; the tool runner falls back
+ * to UTC rather than guessing.
+ */
+function readTimeZone(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const zone = value.trim().slice(0, 64);
+  return /^[A-Za-z0-9_+\-:/]+$/.test(zone) ? zone : undefined;
 }
 
 /** Parse an optional JSON form field without failing the turn on bad input. */

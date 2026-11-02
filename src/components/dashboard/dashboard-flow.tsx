@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Dispatch, SetStateAction } from "react";
 
 import { CardInteractionsProvider } from "@/components/dashboard/card-interactions";
 import { OrbCommandMenu, type OrbCommand } from "@/components/dashboard/orb-command-menu";
@@ -11,46 +12,47 @@ import {
 } from "@/components/dashboard/orb-chrome";
 import { OrbHalo } from "@/components/dashboard/orb-stage";
 import { Chatbox } from "@/components/dashboard/chatbox";
+import { ThreadSidebar } from "@/components/dashboard/thread-sidebar";
 import { TurnDebugPanel } from "@/components/dashboard/turn-debug-panel";
-import { MAX_SESSION_MESSAGES, useOrbTurn } from "@/components/dashboard/use-orb-turn";
+import { useOrbTurn } from "@/components/dashboard/use-orb-turn";
 import { useSignVideo } from "@/components/dashboard/use-sign-video";
-import { sampleVideoStills } from "@/lib/sign-stills";
+import type { SignVideoStatus } from "@/components/dashboard/use-sign-video";
+import { useVisionGuard } from "@/components/dashboard/use-vision-guard";
+import { useFrameCapture } from "@/components/dashboard/use-frame-capture";
+import { useCameraGestures } from "@/components/dashboard/use-camera-gestures";
+import { sampleVideoStills } from "@/lib/media-stills";
+import { startReminderScheduler } from "@/lib/reminder-scheduler";
 import { useSileroVad } from "@/components/dashboard/use-silero-vad";
 import { useVoiceLevel } from "@/components/dashboard/use-voice-level";
 import { encodeWav } from "@/lib/wav";
+import { convertAttachment } from "@/lib/attach-file";
 import { AdaptiveCard } from "@/components/layout/adaptive-card";
+import { AccessBar } from "@/components/dashboard/access-bar";
+import {
+  capabilitiesFor,
+  isSpeechEnabled,
+  type AccessMode,
+} from "@/lib/access-modes";
 import { SidebarPanel } from "@/components/dashboard/sidebar-panel";
 import { cardKind } from "@/lib/cards";
-import { MAX_CARDS } from "@/lib/cards";
+import type { ChatMessage } from "@/lib/chat-message";
 import {
-  isChatMessage,
-  MAX_MESSAGE_CHARS,
-  type ChatMessage,
-} from "@/lib/chat-message";
+  createThread,
+  threadTitleFor,
+  type ChatThread,
+} from "@/lib/threads";
+import {
+  dbDeleteThread,
+  dbLoadStore,
+  dbSaveThread,
+  dbSetActiveThread,
+} from "@/lib/db/threads";
 import { toolTraceLabel } from "@/lib/tool-trace";
 import { useLayoutContext } from "@/lib/layout/use-layout-context";
 import { ParticlesOrb } from "@/registry/orbe/particles-orb/particles-orb";
 
-const HISTORY_KEY = "history";
-/**
- * History lives in localStorage so it survives tab closes and holds more
- * than a session store. On a write failure (quota or blocked storage), retry
- * with a smaller tail instead of losing persistence entirely.
- */
-function persistHistory(history: ChatMessage[]) {
-  for (const tail of [history, history.slice(-250), history.slice(-100)]) {
-    try {
-      window.localStorage.setItem(HISTORY_KEY, JSON.stringify(tail));
-      return;
-    } catch {
-      // Quota or blocked storage: try a smaller tail, then give up quietly.
-    }
-  }
-}
 /** Leave the speaker tail behind before listening again. */
 const POST_REPLY_ARM_DELAY = 900;
-/** A turn keeps this many tool rows with its reply. */
-const SESSION_TOOL_LIMIT = 6;
 
 const PREVIEWS: { value: OrbPreview; label: string }[] = [
   { value: "auto", label: "Follow the session" },
@@ -65,42 +67,6 @@ const PREVIEWS: { value: OrbPreview; label: string }[] = [
   { value: "disabled", label: "Muted" },
 ];
 
-function readHistory(): ChatMessage[] {
-  if (typeof window === "undefined") return [];
-
-  try {
-    const raw = window.localStorage.getItem(HISTORY_KEY);
-    if (!raw) return [];
-
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-
-    return parsed
-      .filter(isChatMessage)
-      .map((message) => ({
-        id: message.id ?? crypto.randomUUID(),
-        role: message.role,
-        content: message.content.slice(0, MAX_MESSAGE_CHARS),
-        ...(typeof message.speak === "string"
-          ? { speak: message.speak.slice(0, MAX_MESSAGE_CHARS) }
-          : {}),
-        ...(message.cards?.length
-          ? { cards: message.cards.slice(0, MAX_CARDS) }
-          : {}),
-        ...(message.sources?.length
-          ? { sources: message.sources.slice(0, 12) }
-          : {}),
-        ...(message.tools?.length
-          ? { tools: message.tools.slice(-SESSION_TOOL_LIMIT) }
-          : {}),
-        timestamp: message.timestamp,
-      }))
-      .slice(-MAX_SESSION_MESSAGES);
-  } catch {
-    return [];
-  }
-}
-
 export function DashboardFlow() {
   const { levelRef, status, toggle, getStream } = useVoiceLevel();
   const sentSignRef = useRef<Blob | null>(null);
@@ -108,14 +74,170 @@ export function DashboardFlow() {
   // carries them once ("that sign I just did"), then they are dropped.
   const mediaStashRef = useRef<string[] | null>(null);
   const [signTranscribing, setSignTranscribing] = useState(false);
-  // Hydration-safe: start empty on server and first client render, hydrate from localStorage after mount.
-  const [history, setHistory] = useState<ChatMessage[]>([]);
+  // Threads: every chat on this device, newest first. Hydration-safe: start
+  // empty on server and first client render, hydrate from IndexedDB after
+  // mount. Refs mirror the state so stable turn callbacks can update the
+  // active thread without closing over stale values.
+  const [threads, setThreadsState] = useState<ChatThread[]>([]);
+  const [activeId, setActiveIdState] = useState<string | null>(null);
+  const threadsRef = useRef<ChatThread[]>([]);
+  const activeIdRef = useRef<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [preview, setPreview] = useState<OrbPreview>("auto");
   const [progress, setProgress] = useState(0.5);
   const [orbSize, setOrbSize] = useState(360);
   const [openCardId, setOpenCardId] = useState<string | null>(null);
   const [debugOpen, setDebugOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [accessMode, setAccessMode] = useState<AccessMode>("autism");
+  const [voiceReplies, setVoiceReplies] = useState(false);
+
+  const capabilities = capabilitiesFor(accessMode);
+  const speechEnabled = isSpeechEnabled(accessMode, voiceReplies);
+
+  /** One writer for threads + active id, keeping the refs in sync. */
+  const storeThreads = useCallback(
+    (next: ChatThread[], nextActiveId: string | null) => {
+      threadsRef.current = next;
+      activeIdRef.current = nextActiveId;
+      setThreadsState(next);
+      setActiveIdState(nextActiveId);
+    },
+    [],
+  );
+
+  /** The active thread's messages: what the turn sends and renders. */
+  const history = useMemo(
+    () =>
+      threads.find((thread) => thread.id === activeId)?.messages ?? [],
+    [threads, activeId],
+  );
+
+  /**
+   * The useOrbTurn-compatible writer: applies a message update to the active
+   * thread, refreshes its title and timestamp, and moves it to the front.
+   */
+  const setHistory: Dispatch<SetStateAction<ChatMessage[]>> = useCallback(
+    (action) => {
+      const list = threadsRef.current;
+      const target =
+        list.find((thread) => thread.id === activeIdRef.current) ?? list[0];
+
+      if (!target) {
+        const messages =
+          typeof action === "function" ? action([]) : action;
+        const fresh = createThread(messages);
+        storeThreads([fresh], fresh.id);
+        void dbSaveThread(fresh);
+        void dbSetActiveThread(fresh.id);
+        return;
+      }
+
+      const messages =
+        typeof action === "function" ? action(target.messages) : action;
+      const updated: ChatThread = {
+        ...target,
+        messages,
+        title:
+          messages.length === 0
+            ? "New chat"
+            : threadTitleFor(messages, target.title),
+        updatedAt: Date.now(),
+      };
+      const next = [
+        updated,
+        ...list.filter((thread) => thread.id !== updated.id),
+      ];
+
+      storeThreads(next, updated.id);
+      void dbSaveThread(updated);
+    },
+    [storeThreads],
+  );
+
+  /**
+   * A `start_new_chat` turn opens a fresh thread seeded with the reset
+   * exchange, keeping the old thread in the list instead of deleting it.
+   */
+  const handleNewSession = useCallback(
+    (
+      userMessage: ChatMessage | undefined,
+      assistantMessage: ChatMessage,
+    ) => {
+      const fresh = createThread(
+        userMessage ? [userMessage, assistantMessage] : [assistantMessage],
+      );
+      const next = [fresh, ...threadsRef.current];
+
+      storeThreads(next, fresh.id);
+      void dbSaveThread(fresh);
+      void dbSetActiveThread(fresh.id);
+      setOpenCardId(null);
+    },
+    [storeThreads],
+  );
+
+  // Set when the model calls `open_camera`: the browser (not the model)
+  // owns the permission prompt. The latest camera controls land here after
+  // each render, so the stable turn callback can use them.
+  const cameraRequestRef = useRef(false);
+  // Set when the model calls `shutdown`: the voice session ends after the
+  // goodbye reply has fully finished playing.
+  const shutdownRef = useRef(false);
+  // Set by the frame hook: lets the stable tool callback request a capture.
+  const frameRequestRef = useRef<(() => void) | null>(null);
+  const cameraControlsRef = useRef<{
+    status: SignVideoStatus;
+    toggle: () => void;
+  } | null>(null);
+
+  const handleToolRequest = useCallback((tool: string) => {
+    if (tool === "shutdown") {
+      shutdownRef.current = true;
+      return;
+    }
+
+    if (tool === "frame") {
+      // The hook records a short clip once the turn is idle and the camera is
+      // live (also after an open_camera consent).
+      frameRequestRef.current?.();
+      return;
+    }
+
+    if (tool !== "open_camera") return;
+
+    cameraRequestRef.current = true;
+
+    const controls = cameraControlsRef.current;
+    if (!controls) return;
+
+    if (
+      controls.status === "live" ||
+      controls.status === "starting" ||
+      controls.status === "waiting"
+    ) {
+      return;
+    }
+
+    controls.toggle();
+  }, []);
+
+  const {
+    status: signStatus,
+    facing: signFacing,
+    errorDetail: signError,
+    recording: signRecording,
+    clipBlob: signClip,
+    attachVideo,
+    getVideo,
+    getStream: getCameraStream,
+    toggleCamera,
+    disableCamera,
+    startRecording: startSignRecording,
+    stopRecording: stopSignRecording,
+    discardRecording: discardSignRecording,
+    clearClip: clearSignClip,
+  } = useSignVideo();
 
   const {
     aiState,
@@ -129,20 +251,123 @@ export function DashboardFlow() {
     failTurn,
     wire,
     clearWire,
-  } = useOrbTurn({ history, setHistory });
-  const {
-    status: signStatus,
-    errorDetail: signError,
-    recording: signRecording,
-    clipBlob: signClip,
-    attachVideo,
-    toggleCamera,
-    disableCamera,
-    startRecording: startSignRecording,
-    stopRecording: stopSignRecording,
-    discardRecording: discardSignRecording,
-    clearClip: clearSignClip,
-  } = useSignVideo();
+  } = useOrbTurn({
+    history,
+    setHistory,
+    onNewSession: handleNewSession,
+    onToolRequest: handleToolRequest,
+    speech: speechEnabled,
+    mode: accessMode,
+    voiceReplies,
+    cameraOn: signStatus === "live",
+  });
+
+  useEffect(() => {
+    cameraControlsRef.current = {
+      status: signStatus,
+      toggle: toggleCamera,
+    };
+  }, [signStatus, toggleCamera]);
+
+  const aiStateRef = useRef(aiState);
+  useEffect(() => {
+    aiStateRef.current = aiState;
+  }, [aiState]);
+
+  useEffect(() => {
+    // Due reminders announce on their own clock: the notification and beep
+    // fire on time, while a spoken topic waits for the orb to go idle so it
+    // never talks over the conversation or the reply audio still playing.
+    return startReminderScheduler({
+      isIdle: () => aiStateRef.current === "idle",
+      mode: accessMode,
+    });
+  }, [accessMode]);
+
+  /** The `+` button: a blank thread, stopping any turn in flight. */
+  const startThread = useCallback(() => {
+    stopTurn();
+    const fresh = createThread();
+    const next = [fresh, ...threadsRef.current];
+
+    storeThreads(next, fresh.id);
+    void dbSaveThread(fresh);
+    void dbSetActiveThread(fresh.id);
+    setOpenCardId(null);
+    setSidebarOpen(false);
+  }, [stopTurn, storeThreads]);
+
+  /**
+   * The access bar's one writer. Every change opens a fresh thread, so no
+   * instruction or tool from the previous mode can survive in history, and
+   * it stops the mic and any signing first. `null` means accessibility off.
+   */
+  const handleAccessChange = useCallback(
+    (next: AccessMode) => {
+      if (next === accessMode) return;
+
+      stopTurn();
+      if (status === "live" || status === "starting" || status === "waiting") {
+        toggle();
+      }
+      if (signRecording === "recording") discardSignRecording();
+      if (!capabilitiesFor(next).sign) disableCamera();
+      clearSignClip();
+      mediaStashRef.current = null;
+      sentSignRef.current = null;
+      setVoiceReplies(false);
+      setAccessMode(next);
+      startThread();
+    },
+    [
+      accessMode,
+      clearSignClip,
+      disableCamera,
+      discardSignRecording,
+      signRecording,
+      startThread,
+      status,
+      stopTurn,
+      toggle,
+    ],
+  );
+
+  const switchThread = useCallback(
+    (id: string) => {
+      if (!threadsRef.current.some((thread) => thread.id === id)) return;
+
+      stopTurn();
+      storeThreads(threadsRef.current, id);
+      void dbSetActiveThread(id);
+      setOpenCardId(null);
+      setSidebarOpen(false);
+    },
+    [stopTurn, storeThreads],
+  );
+
+  const deleteThread = useCallback(
+    (id: string) => {
+      const remaining = threadsRef.current.filter(
+        (thread) => thread.id !== id,
+      );
+
+      void dbDeleteThread(id);
+
+      if (activeIdRef.current === id) {
+        const replacement = remaining[0] ?? createThread();
+        const next = remaining.length > 0 ? remaining : [replacement];
+
+        storeThreads(next, replacement.id);
+        void dbSaveThread(replacement);
+        void dbSetActiveThread(replacement.id);
+      } else {
+        storeThreads(remaining, activeIdRef.current);
+      }
+
+      setOpenCardId(null);
+    },
+    [storeThreads],
+  );
 
   const takeStashedMedia = useCallback((): string[] | undefined => {
     const stashed = mediaStashRef.current;
@@ -152,10 +377,31 @@ export function DashboardFlow() {
   }, []);
 
   const sendTextWithMedia = useCallback(
-    async (text: string) => {
-      await sendText(text, { mediaFrames: takeStashedMedia() });
+    async (text: string, file?: File) => {
+      const frames = takeStashedMedia() ?? [];
+      let message = text;
+
+      if (file) {
+        try {
+          const converted = await convertAttachment(file);
+
+          if (converted.kind === "image") {
+            frames.push(converted.frame);
+            message = `${text} (attached: ${file.name})`;
+          } else {
+            message = `${text}\n\n[Attached file: ${file.name}]\n${converted.content}`;
+          }
+        } catch (error) {
+          failTurn(
+            error instanceof Error ? error.message : "That file could not be attached.",
+          );
+          return;
+        }
+      }
+
+      await sendText(message, { mediaFrames: frames });
     },
-    [sendText, takeStashedMedia],
+    [failTurn, sendText, takeStashedMedia],
   );
 
   const respondWithMedia = useCallback(
@@ -166,6 +412,29 @@ export function DashboardFlow() {
   );
 
   const closeDebug = useCallback(() => setDebugOpen(false), []);
+
+  // The model asked for the camera but it never opened: tell the model in a
+  // follow-up turn so it speaks the denial ("no permission — please allow
+  // camera permission") instead of leaving the user hanging. Runs once per
+  // request, only after the requesting turn has fully finished.
+  useEffect(() => {
+    if (!cameraRequestRef.current) return;
+    if (aiState !== "idle") return;
+
+    if (
+      signStatus === "live" ||
+      signStatus === "starting" ||
+      signStatus === "waiting"
+    ) {
+      if (signStatus === "live") cameraRequestRef.current = false;
+      return;
+    }
+
+    cameraRequestRef.current = false;
+    void sendTextWithMedia(
+      "The camera could not be opened. Tell the user there is no permission and ask them to allow camera permission.",
+    );
+  }, [aiState, signStatus, sendTextWithMedia]);
 
   // Ctrl/Cmd+Shift+D toggles the wire panel without touching the conversation.
   useEffect(() => {
@@ -181,31 +450,77 @@ export function DashboardFlow() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  // Hydrate from localStorage after mount — keeps server and first client render identical.
+  // Hydrate threads from IndexedDB after mount — keeps server and first
+  // client render identical. Falls back to a fresh in-memory thread when the
+  // database is unusable; the session still works, it just won't persist.
   useEffect(() => {
-    setHistory(readHistory());
-    setHydrated(true);
-  }, []);
+    let cancelled = false;
 
-  useEffect(() => {
-    // The session is text only: transcripts and replies, never clips. Skip until hydrated to avoid overwriting with empty.
-    if (!hydrated) return;
-    persistHistory(history);
-  }, [history, hydrated]);
+    void (async () => {
+      const loaded = await dbLoadStore();
+
+      if (cancelled) return;
+
+      if (loaded) {
+        storeThreads(loaded.threads, loaded.activeId);
+      } else {
+        const fresh = createThread();
+        storeThreads([fresh], fresh.id);
+      }
+
+      setHydrated(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [storeThreads]);
 
   const live = status === "live";
   const unavailable = status === "unsupported";
   const previewing = preview !== "auto";
   const vadActive =
     live &&
+    capabilities.microphone &&
     aiState !== "thinking" &&
     aiState !== "searching" &&
     aiState !== "speaking" &&
     !previewing;
   const orbState = orbStateFor({ aiState, mic: status, preview });
-  const mainLabel = mainLabelFor(status);
+  const mainLabel = capabilities.microphone
+    ? mainLabelFor(status)
+    : "Type or sign below";
   const busy =
     aiState === "thinking" || aiState === "searching" || aiState === "speaking";
+
+  const lastUserQuestion = useMemo(
+    () =>
+      [...history].reverse().find((message) => message.role === "user")
+        ?.content ?? "",
+    [history],
+  );
+
+  const frameCapture = useFrameCapture({
+    ready: aiState === "idle" && signStatus === "live",
+    resetKey: accessMode,
+    question: lastUserQuestion,
+    getVideo,
+    getStream: getCameraStream,
+    sendText,
+    fail: failTurn,
+  });
+
+  const guard = useVisionGuard({
+    active: capabilities.guard && signStatus === "live",
+    busy: busy || signTranscribing,
+    getVideo,
+    getStream: getCameraStream,
+    isCapturing: frameCapture.isCapturing,
+  });
+
+  useEffect(() => {
+    frameRequestRef.current = frameCapture.request;
+  }, [frameCapture.request]);
 
   const layoutContext = useLayoutContext();
   const wide = layoutContext.breakpoint === "lg" || layoutContext.breakpoint === "xl";
@@ -215,7 +530,7 @@ export function DashboardFlow() {
     [history],
   );
   const cards = useMemo(() => lastAssistant?.cards ?? [], [lastAssistant]);
-  const showCards = hydrated && cards.length > 0;
+  const showCards = hydrated && capabilities.cards && cards.length > 0;
 
   // A new turn replaces the cards, so an id from the old turn cannot stay open.
   // The first collapsible card of the new turn opens automatically, so nothing
@@ -282,6 +597,16 @@ export function DashboardFlow() {
     if (!signClip || signClip.size === 0) return;
     if (sentSignRef.current === signClip) return;
 
+    // Signing is a permissioned capability. If the mode changed while a clip
+    // was being recorded, the clip is dropped, never sent.
+    if (!capabilitiesFor(accessMode).sign) {
+      sentSignRef.current = signClip;
+      discardSignRecording();
+      clearSignClip();
+      disableCamera();
+      return;
+    }
+
     sentSignRef.current = signClip;
     setSignTranscribing(true);
     dismissError();
@@ -291,21 +616,28 @@ export function DashboardFlow() {
     // typed, so the full prompt, tools, cards, and speech apply there.
     // Stills sampled here become the next turn's media context ("that sign
     // I just did"); a newer clip replaces them.
+    const controller = new AbortController();
+
     const transcribe = async () => {
       try {
         const form = new FormData();
         form.append("video", signClip);
+        form.append("mode", accessMode ?? "");
+        form.append("consent", "1");
 
         const [response] = await Promise.all([
           fetch("/api/orb/transcribe", {
             method: "POST",
             body: form,
+            signal: controller.signal,
           }),
           sampleVideoStills(signClip).then(
             (stills) => {
+              if (controller.signal.aborted) return;
               mediaStashRef.current = stills.length > 0 ? stills : null;
             },
             () => {
+              if (controller.signal.aborted) return;
               mediaStashRef.current = null;
             },
           ),
@@ -314,6 +646,10 @@ export function DashboardFlow() {
           transcript?: string;
           error?: string;
         };
+
+        // The mode may have changed while the clip was being read; a
+        // transcript must never enter a different mode's thread.
+        if (controller.signal.aborted) return;
 
         if (!response.ok) {
           mediaStashRef.current = null;
@@ -328,19 +664,32 @@ export function DashboardFlow() {
           failTurn("I couldn’t read that signing. Try again.");
         }
       } catch {
+        if (controller.signal.aborted) return;
         mediaStashRef.current = null;
         failTurn("I couldn’t read that signing. Try again.");
       } finally {
         setSignTranscribing(false);
-        clearSignClip();
+        if (!controller.signal.aborted) clearSignClip();
       }
     };
 
     void transcribe();
-  }, [clearSignClip, failTurn, sendText, signClip, dismissError]);
 
+    return () => controller.abort();
+  }, [
+    accessMode,
+    clearSignClip,
+    disableCamera,
+    discardSignRecording,
+    failTurn,
+    sendText,
+    signClip,
+    dismissError,
+  ]);
+
+  const signAllowed = capabilities.sign;
   const canSign =
-    signStatus === "live" && !busy && !previewing && !signTranscribing;
+    signAllowed && signStatus === "live" && !busy && !previewing && !signTranscribing;
   const signing = signRecording === "recording";
 
   const signCameraLabel =
@@ -376,6 +725,17 @@ export function DashboardFlow() {
     startSignRecording();
   }, [canSign, dismissError, failTurn, signing, startSignRecording, stopSignRecording]);
 
+  const guardHint =
+    guard.status === "error"
+      ? "Warnings are unavailable right now. Check the camera and try again."
+      : guard.status === "paused"
+        ? "Paused while Atlas is busy."
+        : signStatus === "live"
+          ? "Watching the camera. Atlas speaks when something is in your path."
+          : signStatus === "starting" || signStatus === "waiting"
+            ? "Opening the camera…"
+            : "Turn on the camera to start obstacle warnings.";
+
   const handleSpeechStart = useCallback(() => {
     dismissError();
   }, [dismissError]);
@@ -383,6 +743,7 @@ export function DashboardFlow() {
   const handleSpeechEnd = useCallback(
     (audio: Float32Array) => {
       if (audio.length === 0) return;
+      if (!capabilities.microphone) return;
       // The VAD is paused while a turn runs, so a segment that arrives here
       // belongs to an idle orb. The busy check is a backstop against a segment
       // completing in the same tick a turn starts — sending it would abort
@@ -403,7 +764,7 @@ export function DashboardFlow() {
       });
       void respondWithMedia(blob, history);
     },
-    [aiState, history, respondWithMedia],
+    [aiState, capabilities.microphone, history, respondWithMedia],
   );
 
   const {
@@ -430,11 +791,13 @@ export function DashboardFlow() {
   }, [failTurn, vadError]);
 
   const startConversation = useCallback(() => {
+    if (!capabilities.microphone) return;
+
     setPreview("auto");
     stopTurn();
     primePlayback();
     toggle();
-  }, [primePlayback, stopTurn, toggle]);
+  }, [capabilities.microphone, primePlayback, stopTurn, toggle]);
 
   const endConversation = useCallback(() => {
     stopTurn();
@@ -442,6 +805,16 @@ export function DashboardFlow() {
     mediaStashRef.current = null;
     toggle();
   }, [disableCamera, stopTurn, toggle]);
+
+  // The model called `shutdown`: end the conversation only after the
+  // goodbye reply has finished, never mid-speech. Runs once per request.
+  useEffect(() => {
+    if (!shutdownRef.current) return;
+    if (aiState !== "idle" && aiState !== "error") return;
+
+    shutdownRef.current = false;
+    endConversation();
+  }, [aiState, endConversation]);
 
   const handleMain = useCallback(() => {
     if (unavailable) return;
@@ -510,6 +883,12 @@ export function DashboardFlow() {
   const commands: OrbCommand[] = [
     { label: mainLabel, run: handleMain, active: live },
     { label: signCameraLabel, run: toggleCamera, active: signStatus === "live" },
+    { label: "New chat", run: startThread, active: false },
+    {
+      label: sidebarOpen ? "Hide chats" : "Show chats",
+      run: () => setSidebarOpen((current) => !current),
+      active: sidebarOpen,
+    },
     {
       label: "AI wire (JSON)",
       run: () => setDebugOpen((current) => !current),
@@ -524,12 +903,23 @@ export function DashboardFlow() {
 
   const orbRef = useRef<HTMLDivElement>(null);
 
-  const orbActionLabel =
-    signRecording === "recording" || busy
-      ? "Tap to stop"
-      : live || status === "starting" || status === "waiting"
-        ? "Tap to end the conversation"
-        : "Tap to start the conversation";
+  const { onOrbActivate, onCameraPreviewTap } = useCameraGestures({
+    orbDoubleTap: capabilities.guard,
+    cameraStatus: signStatus,
+    speechEnabled,
+    onOrbTap: handleOrbTap,
+    toggleCamera,
+  });
+
+  const orbActionLabel = `${
+    !capabilities.microphone
+      ? "Type below to talk in this mode"
+      : signRecording === "recording" || busy
+        ? "Tap to stop"
+        : live || status === "starting" || status === "waiting"
+          ? "Tap to end the conversation"
+          : "Tap to start the conversation"
+  }${capabilities.guard ? " Double tap to turn the camera and obstacle warnings on or off." : ""}`;
 
   const orbSlot = (
     <div
@@ -538,7 +928,7 @@ export function DashboardFlow() {
       tabIndex={0}
       aria-label={orbActionLabel}
       title={orbActionLabel}
-      onClick={handleOrbTap}
+      onClick={onOrbActivate}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
@@ -555,8 +945,9 @@ export function DashboardFlow() {
           ref={attachVideo}
           muted
           playsInline
-          aria-label="Camera preview for signing"
-          className="absolute right-1 bottom-1 z-20 h-20 w-20 rounded-full border border-line bg-ink object-cover -scale-x-100"
+          onClick={onCameraPreviewTap}
+          aria-label="Camera preview. Double tap to turn the camera off."
+          className={`absolute right-1 bottom-1 z-20 h-20 w-20 touch-manipulation rounded-full border border-line bg-ink object-cover ${signFacing === "user" ? "-scale-x-100" : ""}`}
         />
       ) : null}
       <OrbHalo state={orbState} levelRef={levelRef} active={!previewing && live} />
@@ -633,6 +1024,26 @@ export function DashboardFlow() {
     <CardInteractionsProvider value={interactions}>
       <div className={`flex w-full flex-col items-center justify-center min-h-full ${showCards ? "max-w-[90rem]" : "max-w-md"}`}>
         <h1 className="sr-only">Atlas orb. Press Control K for controls.</h1>
+        <AccessBar
+          mode={accessMode}
+          onChange={handleAccessChange}
+          voiceReplies={voiceReplies}
+          onVoiceRepliesChange={setVoiceReplies}
+          className="mb-4"
+        />
+        <button
+          type="button"
+          onClick={() => setSidebarOpen((current) => !current)}
+          aria-expanded={sidebarOpen}
+          aria-pressed={sidebarOpen}
+          aria-haspopup="dialog"
+          aria-label={sidebarOpen ? "Hide chats" : "Show chats"}
+          className={`absolute top-[max(1rem,env(safe-area-inset-top))] right-[max(1rem,env(safe-area-inset-right))] z-40 rounded-full border px-3 py-1.5 font-mono text-[11px] backdrop-blur transition-colors ${sidebarOpen ? "border-sage bg-paper/90 text-ink" : "border-line/70 bg-paper/70 text-ink-muted hover:border-sage hover:text-ink"}`}
+        >
+          {hydrated && threads.length > 0
+            ? `Threads (${threads.length})`
+            : "Threads"}
+        </button>
         {showCards ? (
           <div className="w-full">
             {wide ? (
@@ -685,8 +1096,18 @@ export function DashboardFlow() {
 
         <OrbCommandMenu commands={commands} />
 
+        <ThreadSidebar
+          open={sidebarOpen}
+          onOpenChange={setSidebarOpen}
+          threads={threads}
+          activeId={activeId}
+          onNew={startThread}
+          onSwitch={switchThread}
+          onDelete={deleteThread}
+        />
+
         <div className="mt-6 flex w-full max-w-md flex-col items-center gap-3">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center justify-center gap-3">
             <button
               type="button"
               onClick={toggleCamera}
@@ -694,7 +1115,7 @@ export function DashboardFlow() {
             >
               {signCameraLabel}
             </button>
-            {signStatus === "live" ? (
+            {signAllowed && signStatus === "live" ? (
               <button
                 type="button"
                 disabled={!canSign}
@@ -706,7 +1127,7 @@ export function DashboardFlow() {
               </button>
             ) : null}
           </div>
-          {signStatus === "live" && !busy ? (
+          {signAllowed && signStatus === "live" && !busy ? (
             <p className="text-center font-mono text-[11px] text-ink-muted">
               Tap Sign, sign in ASL, then tap again to send. Keep both hands
               in frame with good light.
@@ -722,9 +1143,20 @@ export function DashboardFlow() {
               Reading your signing…
             </p>
           ) : null}
+          {capabilities.guard ? (
+            <div
+              aria-live="polite"
+              className="max-w-xs text-center font-mono text-[11px] leading-relaxed text-ink-muted"
+            >
+              <p>{guardHint}</p>
+              {guard.lastWarning ? <p>Last warning: {guard.lastWarning}</p> : null}
+            </div>
+          ) : null}
         </div>
 
-        <Chatbox onSendText={sendTextWithMedia} />
+        {capabilities.chatbox ? (
+          <Chatbox onSendText={sendTextWithMedia} />
+        ) : null}
 
         <TurnDebugPanel
           open={debugOpen}

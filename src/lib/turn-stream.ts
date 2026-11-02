@@ -7,6 +7,8 @@
  */
 import { isCardContent, type CardContent } from "./cards";
 import { ORB_ERROR_CODES, type OrbErrorCode } from "./orb-errors";
+import { isReminderDirective, type ReminderDirective } from "./reminders";
+import { isMoodDirective, type MoodDirective } from "./moods";
 import type { SourceLink } from "./source-links";
 import { isTurnDebug, type TurnDebug } from "./turn-debug";
 
@@ -34,6 +36,12 @@ export type TurnEvent =
       speak: string;
       cards?: CardContent[];
       sources?: SourceLink[];
+      /** Set when start_new_chat ran; the client clears old history and cards. */
+      newSession?: boolean;
+      /** Reminder mutations the client applies to its store, in order. */
+      reminders?: ReminderDirective[];
+      /** Mood entries logged this turn; the client writes them to its log. */
+      moods?: MoodDirective[];
       /** Raw model rounds, attached only for explicitly debugged turns. */
       debug?: TurnDebug;
     }
@@ -124,7 +132,9 @@ function isTurnEvent(value: unknown): value is TurnEvent {
           (Array.isArray(event.cards) && event.cards.every(isCardContent))) &&
         (event.sources === undefined ||
           (Array.isArray(event.sources) &&
-            event.sources.every(isSourceLink)))
+            event.sources.every(isSourceLink))) &&
+        (event.newSession === undefined ||
+          typeof event.newSession === "boolean")
       );
     case "error":
       return isOrbErrorCode(event.code) && typeof event.message === "string";
@@ -147,6 +157,44 @@ function sanitizeDebug(event: TurnEvent): TurnEvent {
   }
 
   const { debug: _debug, ...rest } = event;
+  return rest;
+}
+
+/**
+ * Same degrade-not-throw rule for reminder directives: a malformed entry is
+ * dropped, and a wholly malformed field leaves the reply intact — the model
+ * already told the user what happened in words.
+ */
+function sanitizeReminders(event: TurnEvent): TurnEvent {
+  if (event.status !== "speaking" || event.reminders === undefined) {
+    return event;
+  }
+
+  if (
+    Array.isArray(event.reminders) &&
+    event.reminders.every(isReminderDirective)
+  ) {
+    return event;
+  }
+
+  const { reminders: _reminders, ...rest } = event;
+  return rest;
+}
+
+/**
+ * Same rule for mood directives: a malformed entry is dropped so a corrupt
+ * log write never breaks the reply the user can already read or hear.
+ */
+function sanitizeMoods(event: TurnEvent): TurnEvent {
+  if (event.status !== "speaking" || event.moods === undefined) {
+    return event;
+  }
+
+  if (Array.isArray(event.moods) && event.moods.every(isMoodDirective)) {
+    return event;
+  }
+
+  const { moods: _moods, ...rest } = event;
   return rest;
 }
 
@@ -185,7 +233,7 @@ export async function readTurnStream(
 
       if (!isTurnEvent(payload)) continue;
 
-      const event = sanitizeDebug(payload);
+      const event = sanitizeMoods(sanitizeReminders(sanitizeDebug(payload)));
       handlers.onEvent?.(event);
 
       switch (event.status) {

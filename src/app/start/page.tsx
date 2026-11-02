@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { ViewTransition } from "react";
 
-import { AmbientBackdrop } from "@/components/layout/ambient-backdrop";
 import { StartFlow } from "@/components/start/start-flow";
 import { routeTransition } from "@/lib/view-transition";
 
@@ -14,10 +13,10 @@ export const metadata: Metadata = {
 export default function StartPage() {
   return (
     <ViewTransition {...routeTransition}>
-      <main className="page-gutter relative isolate flex min-h-dvh flex-1 items-center justify-center overflow-x-clip bg-sand pt-[max(2rem,env(safe-area-inset-top))] pb-[max(2rem,env(safe-area-inset-bottom))]">
-        <AmbientBackdrop />
-
-        <StartFlow />
+      <main aria-labelledby="start-heading" className="page-gutter bg-sand">
+        <div className="mx-auto w-full max-w-xl py-[clamp(3rem,8vh,5rem)]">
+          <StartFlow />
+        </div>
       </main>
     </ViewTransition>
   );

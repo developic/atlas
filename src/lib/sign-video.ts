@@ -2,27 +2,102 @@
  * Server-only signing-video transcription via Muse Spark.
  *
  * Full video clips go to `muse-spark-1.3-contributor` through OpenCode's Go
- * Responses endpoint, which accepts an mp4 as an `input_video` part. Never
- * import this module from a client component: it reads OPENCODE_API_KEY.
+ * Responses endpoint (the shared `muse-video` transport), which accepts an mp4
+ * as an `input_video` part. Never import this module from a client component:
+ * it reads OPENCODE_API_KEY.
  */
 
-export const SIGN_VIDEO_MODEL = "muse-spark-1.3-contributor";
-const SIGN_VIDEO_URL =
-  "https://opencode.ai/inference/go/openai/v1/responses";
+import { DEFAULT_SIGN_PROMPT } from "./sign-prompt";
+import {
+  MUSE_VIDEO_MODEL,
+  MuseVideoError,
+  askMuseVideo,
+} from "./muse-video";
+export { DEFAULT_SIGN_PROMPT };
+
+export const SIGN_VIDEO_MODEL = MUSE_VIDEO_MODEL;
 const SIGN_VIDEO_TIMEOUT_MS = 180_000;
+/** Upper bound for custom test-client prompts; the default prompt is shorter. */
+const SIGN_PROMPT_MAX_CHARS = 48_000;
 const MAX_VIDEO_BYTES = 15 * 1024 * 1024;
 const ALLOWED_TYPES = ["video/mp4", "video/webm", "video/quicktime"];
 
-export const DEFAULT_SIGN_PROMPT =
-  "Transcribe the American Sign Language signing in this video. Decide only from what the signer\u2019s hands, face, and body do. First write down any on-screen text, captions, or labels you see, then ignore them completely \u2014 they are never the answer, even when they match. Work in three short passes, a few words per segment. 1. Segments: split signing from rest at movement bursts; ignore rest. 2. Signs: reason in 3D, not flat screen positions \u2014 track toward and away from the camera as well as up, down, left, and right, hand rotation, which hand or finger is in front when they overlap, and distance from the torso. A finger hidden behind the hand is occluded, not absent. Outward-from-body versus sideways movement distinguishes signs that look alike flat. For each signing segment give the 5 parameters  \u2014 handshape as a categorical label (H-hand, 1-hand, B-hand, fist, open-5), palm orientation (in, out, up, down, left, right), movement (path: up, down, forward, back, circle, tap, wiggle, or none, plus repeats), location (chin, forehead, chest, front of body, start to end), non-manuals (head, brows, eyes, mouth open or closed) \u2014 and 1H vs 2H with what each hand does. Read as language, not as generic gestures: resemblance to a hearing gesture is not evidence. Trust fingers visible across most frames; brief flashes are transitions. A static hold is a fingerspelled letter (letters run together as one word); name a lexical sign only for its characteristic movement. End with a final line starting \"Transcription:\" followed by only the transcribed words (under 12 words) \u2014 your best reading. Write Transcription: UNCLEAR only if nothing at all is readable.";
-
 export type SignTranscription = {
   transcript: string;
+  /** Structured contract flag: false when nothing at all was readable. */
+  readable: boolean;
   model: string;
   promptTokens: number;
   completionTokens: number;
   ms: number;
 };
+
+/**
+ * Structured-output contract for the transcription turn.
+ *
+ * The gateway enforces this schema (probed live, Nov 2026: a bare-prose
+ * prompt was coerced into the schema shape), so "which words are the
+ * transcription" is a typed field — the route no longer has to recognize
+ * a label phrasing inside free-form model output.
+ */
+const TRANSCRIPTION_FORMAT = {
+  type: "json_schema",
+  name: "sign_transcription",
+  strict: true,
+  schema: {
+    type: "object",
+    properties: {
+      transcription: { type: "string" },
+      readable: { type: "boolean" },
+    },
+    required: ["transcription", "readable"],
+    additionalProperties: false,
+  },
+} as const;
+
+export type ParsedSignTranscription = {
+  transcription: string;
+  readable: boolean;
+};
+
+/** Strict guard for the structured transcription reply. */
+export function parseSignTranscription(text: string): ParsedSignTranscription | null {
+  if (!text) return null;
+
+  try {
+    const parsed: unknown = JSON.parse(text);
+
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      typeof (parsed as { transcription?: unknown }).transcription !== "string" ||
+      typeof (parsed as { readable?: unknown }).readable !== "boolean"
+    ) {
+      return null;
+    }
+
+    const fields = parsed as ParsedSignTranscription;
+
+    return { transcription: fields.transcription, readable: fields.readable };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Deterministic sanity cap, unchanged from the heuristics it replaces: a
+ * transcription over this many words means the comic-page analysis leaked
+ * in, so it is refused (empty string) instead of entering the turn.
+ */
+export const MAX_SIGN_UTTERANCE_WORDS = 30;
+
+/** Trimmed transcription, or empty when nothing speakable remains. */
+export function acceptableSignUtterance(transcription: string): string {
+  const utterance = transcription.trim();
+  const wordCount = utterance.split(/\s+/).filter(Boolean).length;
+
+  return wordCount > MAX_SIGN_UTTERANCE_WORDS ? "" : utterance;
+}
 
 export class SignVideoError extends Error {
   readonly status: number;
@@ -34,19 +109,6 @@ export class SignVideoError extends Error {
   }
 }
 
-function getApiKey(): string {
-  const key = process.env.OPENCODE_API_KEY?.trim();
-
-  if (!key) {
-    throw new SignVideoError(
-      500,
-      "OPENCODE_API_KEY is not configured. Add it to .env.",
-    );
-  }
-
-  return key;
-}
-
 function baseMimeType(mimeType: string): string {
   return mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
 }
@@ -55,7 +117,7 @@ function baseMimeType(mimeType: string): string {
 export function assertSignVideo(
   buffer: Buffer | null,
   mimeType: string,
-): Buffer {
+): { buffer: Buffer; mimeType: string } {
   if (!buffer || buffer.length === 0) {
     throw new SignVideoError(400, "No video was uploaded.");
   }
@@ -67,113 +129,72 @@ export function assertSignVideo(
     );
   }
 
-  if (!ALLOWED_TYPES.includes(baseMimeType(mimeType))) {
+  const mime = baseMimeType(mimeType);
+
+  if (!ALLOWED_TYPES.includes(mime)) {
     throw new SignVideoError(
       400,
       "Only mp4, webm, or mov video can be tested.",
     );
   }
 
-  return buffer;
+  return { buffer, mimeType: mime };
 }
 
 export async function transcribeSigningVideo(
   buffer: Buffer,
   prompt: string = DEFAULT_SIGN_PROMPT,
   signal?: AbortSignal,
+  mimeType = "video/mp4",
 ): Promise<SignTranscription> {
   const startedAt = performance.now();
-  const key = getApiKey();
-  const cleaned = prompt.trim().slice(0, 500) || DEFAULT_SIGN_PROMPT;
-  // The Go gateway routes and caches by conversation. One id per request is
-  // correct; sharing the turn's id across retries keeps the cache warm.
-  const sessionId = `ses_${crypto.randomUUID().replace(/-/g, "")}`;
-  let response: Response;
+  const cleaned = prompt.trim().slice(0, SIGN_PROMPT_MAX_CHARS) || DEFAULT_SIGN_PROMPT;
+  let text: string;
+  let promptTokens = 0;
+  let completionTokens = 0;
 
   try {
-    response = await fetch(SIGN_VIDEO_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json",
-        "User-Agent": "atlas-sign-test/1.0",
-        "x-opencode-session": sessionId,
-      },
-      body: JSON.stringify({
-        model: SIGN_VIDEO_MODEL,
-        input: [
-          {
-            role: "user",
-            content: [
-              { type: "input_text", text: cleaned },
-              {
-                type: "input_video",
-                video_url: `data:video/mp4;base64,${buffer.toString("base64")}`,
-              },
-            ],
-          },
-        ],
-        reasoning: { effort: "minimal" },
-        max_output_tokens: 2048,
-        temperature: 0,
-      }),
-      signal: signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(SIGN_VIDEO_TIMEOUT_MS)])
-        : AbortSignal.timeout(SIGN_VIDEO_TIMEOUT_MS),
+    const result = await askMuseVideo({
+      parts: [
+        { type: "input_text", text: cleaned },
+        {
+          type: "input_video",
+          video_url: `data:${mimeType};base64,${buffer.toString("base64")}`,
+        },
+      ],
+      format: TRANSCRIPTION_FORMAT,
+      timeoutMs: SIGN_VIDEO_TIMEOUT_MS,
+      signal,
     });
+
+    text = result.text;
+    promptTokens = result.promptTokens;
+    completionTokens = result.completionTokens;
   } catch (error) {
-    if (error instanceof Error && error.name === "TimeoutError") {
-      throw new SignVideoError(504, "The video model took too long.");
+    if (error instanceof MuseVideoError) {
+      throw new SignVideoError(error.status, error.message);
     }
 
     throw new SignVideoError(502, "The video model is unreachable.");
   }
 
-  const payload = (await response.json().catch(() => null)) as {
-    output?: Array<{
-      type?: string;
-      content?: Array<{ type?: string; text?: unknown }>;
-    }>;
-    status?: string;
-    usage?: {
-      input_tokens?: number;
-      output_tokens?: number;
-    };
-    error?: { message?: string } | string;
-  } | null;
+  // The reply must satisfy the structured contract. A non-conforming payload
+  // is refused with a retry — the analysis text is never parsed as a guess.
+  const parsed = parseSignTranscription(text);
 
-  if (!response.ok) {
-    const detail =
-      typeof payload?.error === "string"
-        ? payload.error
-        : (payload?.error?.message ?? "");
-
+  if (!parsed) {
     throw new SignVideoError(
       502,
-      `The video model failed (${response.status}): ${detail.slice(0, 160) || "unknown error"}`,
-    );
-  }
-
-  const text = (payload?.output ?? [])
-    .filter((item) => item.type === "message")
-    .flatMap((item) => item.content ?? [])
-    .filter((part) => part.type === "output_text")
-    .map((part) => (typeof part.text === "string" ? part.text : ""))
-    .join("")
-    .trim();
-
-  if (!text) {
-    throw new SignVideoError(
-      502,
-      `The video model returned no transcription (status: ${payload?.status ?? "unknown"}).`,
+      "The video model returned an unreadable transcription.",
     );
   }
 
   return {
-    transcript: text,
+    transcript: parsed.transcription,
+    readable: parsed.readable,
     model: SIGN_VIDEO_MODEL,
-    promptTokens: payload?.usage?.input_tokens ?? 0,
-    completionTokens: payload?.usage?.output_tokens ?? 0,
+    promptTokens,
+    completionTokens,
     ms: Math.round(performance.now() - startedAt),
   };
 }

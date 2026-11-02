@@ -4,20 +4,21 @@
  * `/start` validates the finished answer set and saves it here, so later
  * surfaces can pick it up from one storage key. Each value is checked against
  * the catalog that owns it — a hand-edited or stale entry can never hand a
- * dead voice ID, pace, or tone to a later feature.
+ * dead voice ID, pace, or disability to a later feature.
  */
 
 import {
   AGE_RANGES,
+  DISABILITIES,
   PACES,
-  TONE_STYLES,
   type AgeRange,
+  type Disability,
   type PaceId,
-  type ToneId,
 } from "@/components/start/start-data";
 import { DEEPGRAM_VOICES, type DeepgramVoiceId } from "@/lib/deepgram";
+import { dbGetPref, dbSetPref } from "@/lib/db/prefs";
 
-const ONBOARDING_STORAGE_KEY = "atlas-onboarding";
+const ONBOARDING_PREF_KEY = "onboarding";
 
 /** Matches the input's `maxLength` so storage can't hold more than the UI. */
 const MAX_NAME_LENGTH = 60;
@@ -29,11 +30,11 @@ export type Onboarding = {
   ageRange: AgeRange | null;
   voiceId: DeepgramVoiceId | null;
   pace: PaceId;
-  tones: ToneId[];
+  disability: Disability | null;
 };
 const AGE_VALUES = AGE_RANGES.map((range) => range.value);
 const PACE_IDS = PACES.map((pace) => pace.id);
-const TONE_IDS = TONE_STYLES.map((tone) => tone.id);
+const DISABILITY_VALUES = DISABILITIES.map((item) => item.value);
 const VOICE_IDS = Object.keys(DEEPGRAM_VOICES) as DeepgramVoiceId[];
 
 function isOneOf<T extends string>(
@@ -56,42 +57,35 @@ function parseOnboarding(value: unknown): Onboarding | null {
   if (typeof value !== "object" || value === null) return null;
 
   const record = value as Record<string, unknown>;
-  const tones = Array.isArray(record.tones)
-    ? record.tones.filter((tone): tone is ToneId => isOneOf(TONE_IDS, tone))
-    : [];
+  const disability = isOneOf(DISABILITY_VALUES, record.disability)
+    ? record.disability
+    : null;
 
   return {
     name: cleanName(record.name),
     ageRange: isOneOf(AGE_VALUES, record.ageRange) ? record.ageRange : null,
     voiceId: isOneOf(VOICE_IDS, record.voiceId) ? record.voiceId : null,
     pace: isOneOf(PACE_IDS, record.pace) ? record.pace : DEFAULT_PACE,
-    // Two picks is the flow's rule; keep it true even if storage disagrees.
-    tones: [...new Set(tones)].slice(0, 2),
+    disability,
   };
 }
 
-export function saveOnboarding(value: Onboarding) {
-  try {
-    window.localStorage.setItem(
-      ONBOARDING_STORAGE_KEY,
-      JSON.stringify(parseOnboarding(value) ?? value),
-    );
-  } catch {
-    // The flow still works for this session; it just won't be remembered.
-  }
+/** Persist the answers. The write is best effort; the flow works either way. */
+export async function saveOnboarding(value: Onboarding): Promise<void> {
+  if (typeof window === "undefined") return;
+
+  await dbSetPref(ONBOARDING_PREF_KEY, parseOnboarding(value) ?? value);
 }
 
 /** Read the saved answers, or null when `/start` was never completed. */
-export function loadOnboarding(): Onboarding | null {
-  try {
-    const raw = window.localStorage.getItem(ONBOARDING_STORAGE_KEY);
+export async function loadOnboarding(): Promise<Onboarding | null> {
+  if (typeof window === "undefined") return null;
 
-    if (!raw) return null;
+  const stored = await dbGetPref<unknown>(ONBOARDING_PREF_KEY, undefined);
 
-    return parseOnboarding(JSON.parse(raw));
-  } catch {
-    return null;
-  }
+  if (stored === undefined) return null;
+
+  return parseOnboarding(stored);
 }
 
 /**
@@ -102,7 +96,7 @@ export function loadOnboarding(): Onboarding | null {
 export type UserProfile = {
   name: string;
   ageRange: AgeRange | null;
-  tones: ToneId[];
+  disability: Disability | null;
 };
 
 export function parseProfile(value: unknown): UserProfile | undefined {
@@ -110,5 +104,5 @@ export function parseProfile(value: unknown): UserProfile | undefined {
 
   if (!parsed || !parsed.name) return undefined;
 
-  return { name: parsed.name, ageRange: parsed.ageRange, tones: parsed.tones };
+  return { name: parsed.name, ageRange: parsed.ageRange, disability: parsed.disability };
 }

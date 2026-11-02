@@ -3,7 +3,8 @@
  *
  * One turn is a small agent loop: send the recording/typed message to Baseten
  * with the Atlas system prompt, and let the model act through native
- * `tool_calls` (websearch, webfetch, get_current_time, create, speak). Each
+ * `tool_calls` (websearch, webfetch, get_current_time, create, start_new_chat,
+ * open_camera, shutdown, reminder, speak). Each
  * round either runs tool calls and continues the loop, or ends the turn with
  * the collected spoken segments and cards. The model never answers through a
  * text field; everything user-visible comes from a tool call.
@@ -21,22 +22,40 @@
  */
 
 import { buildAtlasSystemPrompt } from "./atlas-prompt";
+import type { AccessMode } from "./access-modes";
+import { capabilitiesFor, isToolAllowed, toolsForMode } from "./access-modes";
 import type { UserProfile } from "./onboarding";
 import { joinCardMarkdown, MAX_CARDS, type CardContent } from "./cards";
 import type { ChatMessage } from "./chat-message";
 import { MAX_TRANSCRIPT_CHARS, normalizeSpeech } from "./orb-turn";
 import { OrbError } from "./orb-errors";
 import {
+  renderReminderSnapshot,
+  type ReminderDirective,
+  type ReminderSnapshotItem,
+} from "./reminders";
+import {
+  renderMoodSnapshot,
+  type MoodDirective,
+  type MoodSnapshotItem,
+} from "./moods";
+import {
   executeTool,
   ORB_TOOLS,
   parseNativeToolCalls,
+  toolsFor,
   type NativeCall,
+  type OrbTool,
+  type ToolContext,
   type ToolOutcome,
   type ToolRequest,
   type ToolResult,
 } from "./tools/registry";
 import { selectReplySources, type SourceLink } from "./source-links";
-import { validateSpeechClaim } from "./speech-integrity";
+import {
+  looksLikeToolCall,
+  validateSpeechClaim,
+} from "./speech-integrity";
 import type { TurnDebug, TurnDebugRound } from "./turn-debug";
 
 // ---------------------------------------------------------------------------
@@ -45,7 +64,13 @@ import type { TurnDebug, TurnDebugRound } from "./turn-debug";
 
 const BASETEN_MODEL = "meta-models/muse-spark-open-1026";
 const BASETEN_URL = "https://inference.baseten.co/v1/chat/completions";
-const DEFAULT_MAX_REPLY_TOKENS = 1_200;
+/**
+ * 1_200 truncated six-card `create` calls (finish_reason "length"), and the
+ * force-speak repair then discarded the screen work. 3_000 stays far below
+ * the validator caps (6 × 4k chars of card content) while giving structured
+ * tool calls room to complete in one piece.
+ */
+const DEFAULT_MAX_REPLY_TOKENS = 3_000;
 const MODEL_TIMEOUT_MS = 60_000;
 const REASONING_EFFORT = "low";
 const MAX_SESSION_CHARS = 64;
@@ -77,6 +102,12 @@ export type OmniTurn = {
   meta: TurnMeta;
   sources: SourceLink[];
   cards: CardContent[];
+  /** Set when start_new_chat ran; the client clears old history and cards. */
+  newSession?: boolean;
+  /** Reminder mutations the client applies to its store, in arrival order. */
+  reminders?: ReminderDirective[];
+  /** Mood entries written this turn; the client applies them to its log. */
+  moods?: MoodDirective[];
   /** Raw provider rounds, present only for explicitly debugged turns. */
   debug?: TurnDebug;
 };
@@ -104,6 +135,29 @@ export type TurnContext = {
    * the transcribed words. The caller owns clearing them after one turn.
    */
   mediaFrames?: string[];
+  /**
+   * Pending reminders from the client's store, attached only when non-empty.
+   * Rendered into the turn as model-readable context (next to history, never
+   * inside the cached system prompt), so the model lists and resolves ids
+   * from application data instead of inventing them.
+   */
+  reminderSnapshot?: ReminderSnapshotItem[];
+  /**
+   * The user's recent mood entries, attached only in autism mode. Rendered
+   * beside the user message (never inside the cached prompt) so trend answers
+   * come from the log, not from the model's memory.
+   */
+  moodSnapshot?: MoodSnapshotItem[];
+  /** IANA time zone for wall-clock phrases ("tomorrow at 9am"). */
+  timeZone?: string;
+  /** Whether the client's camera is live at the start of this turn. */
+  cameraOn?: boolean;
+  /**
+   * Selected accessibility mode. `null`/absent keeps the existing behaviour:
+   * full prompt, every tool, speech on. A mode swaps the instruction section
+   * and the registered tool list, and the registry refuses anything else.
+   */
+  mode?: AccessMode | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -119,6 +173,8 @@ type DebugCapture = {
 type TurnRun = {
   signal: AbortSignal;
   session?: string;
+  /** Selected access mode; drives tool permissions and card delivery. */
+  mode: AccessMode | null;
   debug?: DebugCapture;
 };
 
@@ -128,6 +184,9 @@ type TurnState = {
   sources: SourceLink[];
   cards: CardContent[];
   speakSegments: string[];
+  newSession: boolean;
+  reminders: ReminderDirective[];
+  moods: MoodDirective[];
 };
 
 /** One `tool_call_id` resolved, with the content the model sees. */
@@ -281,15 +340,47 @@ async function requestTurn(
     });
   }
 
+  const reminderBlock = renderReminderSnapshot(context.reminderSnapshot ?? []);
+  if (reminderBlock) {
+    userContent.push({ type: "text", text: reminderBlock });
+  }
+
+  const now = Date.now();
+  const moodBlock = renderMoodSnapshot(context.moodSnapshot ?? [], now);
+  if (moodBlock) {
+    userContent.push({ type: "text", text: moodBlock });
+  }
+
+  userContent.push({
+    type: "text",
+    text: context.cameraOn
+      ? "## Camera\nCamera is on. The frame tool can capture the current view."
+      : "## Camera\nCamera is off. You cannot see anything right now; the frame tool will fail until the user turns the camera on.",
+  });
+
+  const mode = context.mode ?? null;
+  const tools = toolsFor(mode);
   const messages: Message[] = [
-    { role: "system", content: buildAtlasSystemPrompt(new Date(), context.profile) },
+    {
+      role: "system",
+      content: buildAtlasSystemPrompt(new Date(), context.profile, mode),
+    },
     ...history.map((message) => ({ role: message.role, content: message.content })),
     { role: "user", content: userContent },
   ];
+  const toolContext: ToolContext = {
+    now,
+    allowedTools: toolsForMode(mode),
+    ...(context.timeZone ? { timeZone: context.timeZone } : {}),
+    ...(context.reminderSnapshot ? { snapshot: context.reminderSnapshot } : {}),
+    ...(context.moodSnapshot ? { moods: context.moodSnapshot } : {}),
+    cameraOn: context.cameraOn === true,
+  };
 
   const run: TurnRun = {
     signal: composeTurnSignal(context.signal),
     session: normalizeSession(context.session),
+    mode,
     debug: context.debug
       ? { startedAt: performance.now(), rounds: [] }
       : undefined,
@@ -300,6 +391,9 @@ async function requestTurn(
     sources: [],
     cards: [],
     speakSegments: [],
+    newSession: false,
+    reminders: [],
+    moods: [],
   };
   /** Request keys whose successful result was already folded into the turn,
    *  so a deduped repeat call cannot double-commit a card or speech segment. */
@@ -312,6 +406,13 @@ async function requestTurn(
 
   let result: ModelResult | null = null;
   let toolRounds = 0;
+  /**
+   * Consecutive rounds that only spoke while no action ran yet. The first
+   * such round does not end the turn: the model may still act afterwards
+   * (say goodbye, then call shutdown). The second one ends it, so a model
+   * that only ever speaks cannot loop forever.
+   */
+  let speakOnlyStreak = 0;
 
   for (;;) {
     if (run.signal.aborted) {
@@ -320,8 +421,8 @@ async function requestTurn(
 
     const seen = reporterFor(callbacks);
 
-    result = await runModelTurn(apiKey, messages, seen, run);
-    const calls = parseNativeToolCalls(result.nativeToolCalls);
+    result = await runModelTurn(apiKey, messages, seen, run, tools);
+    const calls = restrictCalls(parseNativeToolCalls(result.nativeToolCalls), mode);
 
     if (calls.length === 0) {
       const ended = await endWithContent(
@@ -329,7 +430,6 @@ async function requestTurn(
         messages,
         state,
         toolRounds,
-        actionsRan,
         run,
         seen,
       );
@@ -356,7 +456,14 @@ async function requestTurn(
     const roundActionsRan =
       actionsRan ||
       calls.some((call) => call.request && call.request.tool !== "speak");
-    const outcomes = await executeNativeCalls(calls, roundActionsRan, runCache, run.signal);
+
+    // `open_camera` and `frame` can arrive in one round; the client opens for
+    // the first, so the frame call must not be told the camera is still off.
+    if (calls.some((call) => call.request?.tool === "open_camera")) {
+      toolContext.cameraOn = true;
+    }
+
+    const outcomes = await executeNativeCalls(calls, runCache, run.signal, toolContext);
 
     for (const outcome of outcomes) {
       if (!outcome.ok || !outcome.result || !outcome.key) continue;
@@ -369,18 +476,57 @@ async function requestTurn(
       state.sources.push(...outcome.result.sources);
       collectCards([outcome.result], state);
 
+      if (outcome.result.newSession) {
+        state.newSession = true;
+      }
+
+      if (outcome.result.reminder) {
+        state.reminders.push(outcome.result.reminder);
+      }
+
+      if (outcome.result.mood) {
+        state.moods.push(outcome.result.mood);
+      }
+
+      if (outcome.call.request?.tool === "open_camera") {
+        // The client opens the camera for this call; later rounds in the same
+        // turn may ask for a frame and must not be told it is still off.
+        toolContext.cameraOn = true;
+      }
+
       if (outcome.call.request?.tool === "speak") {
         commitSpeech(outcome.call.request.arguments.text ?? "", state);
       }
     }
 
+    // A reset turn is speak-only: old cards and sources are gone, so anything
+    // the model created alongside the reset is dropped.
+    if (state.newSession) {
+      state.cards = [];
+      state.sources = [];
+    }
+
     // Terminal round: every call succeeded, every call put content on the
-    // turn (create or speak), and at least one utterance was approved. Without
-    // this the native-only loop would make one more model call.
+    // turn (create, start_new_chat, open_camera, shutdown, reminder, or speak), and at least one
+    // approved. Without this the native-only loop would make one more model call.
+    // Exception: a round of only `speak` with no action behind it yet does
+    // not end the turn — the model may act after speaking.
     const allOk = outcomes.every((outcome) => outcome.ok);
 
-    if (allOk && calls.every(isCreateOrSpeak) && state.speakSegments.length > 0) {
-      return finalize(result, state, toolRounds, seen, run.debug);
+    if (allOk && calls.every(isTerminalCall) && state.speakSegments.length > 0) {
+      const speakOnly =
+        calls.every((call) => call.request?.tool === "speak") &&
+        !roundActionsRan;
+
+      if (!speakOnly || speakOnlyStreak >= 1) {
+        return finalize(result, state, toolRounds, seen, run.mode, run.debug);
+      }
+
+      speakOnlyStreak += 1;
+    } else if (
+      calls.some((call) => call.request && call.request.tool !== "speak")
+    ) {
+      speakOnlyStreak = 0;
     }
 
     // Non-terminal: report every outcome, including failures, to the model
@@ -405,8 +551,16 @@ async function requestTurn(
 // Round helpers
 // ---------------------------------------------------------------------------
 
-function isCreateOrSpeak(call: NativeCall): boolean {
-  return !!call.request && (call.request.tool === "create" || call.request.tool === "speak");
+function isTerminalCall(call: NativeCall): boolean {
+  return (
+    !!call.request &&
+    (call.request.tool === "create" ||
+      call.request.tool === "start_new_chat" ||
+      call.request.tool === "open_camera" ||
+      call.request.tool === "shutdown" ||
+      call.request.tool === "reminder" ||
+      call.request.tool === "speak")
+  );
 }
 
 function reporterFor(callbacks: TurnCallbacks): TurnCallbacks {
@@ -456,15 +610,27 @@ function commitSpeech(text: string, state: TurnState): void {
 function toolDetail(tool: string, args: Record<string, string>): string | undefined {
   if (tool === "webfetch") return args.url;
   if (tool === "websearch") return args.query;
+  if (tool === "start_new_chat") return args.reason;
+  if (tool === "open_camera") return args.reason;
+  if (tool === "shutdown") return args.reason;
+  if (tool === "reminder") {
+    const action = args.action?.trim();
+    const title = args.title?.trim().slice(0, 48);
+    return [action, title].filter(Boolean).join(" ") || undefined;
+  }
+  if (tool === "mood") {
+    const action = args.action?.trim();
+    const note = args.note?.trim().slice(0, 48);
+    return [action, note].filter(Boolean).join(" ") || undefined;
+  }
   if (tool === "speak") return args.text?.slice(0, 80);
   return undefined;
 }
 
 /**
  * End the turn when the provider returned no native tool calls. The content
- * itself is the candidate utterance: when actions ran this turn, prose cannot
- * claim them, and tool-call JSON arriving as text is structurally rejected —
- * never replayed into tool calls.
+ * itself is the candidate utterance, and tool-call syntax arriving as text
+ * is structurally rejected — never replayed into tool calls.
  *
  * Rejected replies are withheld: the model gets a corrective message and the
  * loop continues so it can answer through the native `speak` tool instead.
@@ -474,14 +640,13 @@ async function endWithContent(
   messages: Message[],
   state: TurnState,
   toolRounds: number,
-  actionsRan: boolean,
   run: TurnRun,
   seen: TurnCallbacks,
 ): Promise<OmniTurn | null> {
   const plain = result.content.trim();
 
   if (plain) {
-    const verdict = validateSpeechClaim({ text: plain, actionsRan });
+    const verdict = validateSpeechClaim({ text: plain });
 
     if (!verdict.ok) {
       messages.push({ role: "assistant", content: result.content });
@@ -499,7 +664,31 @@ async function endWithContent(
     commitSpeech(plain, state);
   }
 
-  return finalize(result, state, toolRounds, seen, run.debug);
+  return finalize(result, state, toolRounds, seen, run.mode, run.debug);
+}
+
+/**
+ * Turn a native call for a tool the selected mode does not register into a
+ * readable failure. The provider already receives only the mode's tools; this
+ * catches a reconstructed call, and the registry applies the same check again
+ * when the runner executes.
+ */
+function restrictCalls(calls: NativeCall[], mode: AccessMode | null): NativeCall[] {
+  if (!mode) return calls;
+
+  return calls.map((call) => {
+    const request = call.request;
+
+    if (!mode || !request || isToolAllowed(mode, request.tool)) return call;
+
+    const tool = String(request.tool);
+
+    return {
+      ...call,
+      request: null,
+      error: `${tool} is not available in this access mode.`,
+    };
+  });
 }
 
 /**
@@ -548,9 +737,9 @@ function requestKey(request: ToolRequest): string {
  */
 async function executeNativeCalls(
   calls: NativeCall[],
-  actionsRan: boolean,
   runCache: Map<string, Promise<ToolOutcome>>,
   signal?: AbortSignal,
+  toolContext?: ToolContext,
 ): Promise<CallOutcome[]> {
   return Promise.all(
     calls.map(async (call): Promise<CallOutcome> => {
@@ -568,7 +757,7 @@ async function executeNativeCalls(
       let promise = runCache.get(key);
 
       if (!promise) {
-        promise = runRequest(call.request, actionsRan, signal);
+        promise = runRequest(call.request, signal, toolContext);
         runCache.set(key, promise);
       }
 
@@ -591,11 +780,11 @@ async function executeNativeCalls(
  */
 async function runRequest(
   request: ToolRequest,
-  actionsRan: boolean,
   signal?: AbortSignal,
+  toolContext?: ToolContext,
 ): Promise<ToolOutcome> {
   try {
-    return await executeTool(request.tool, request.arguments, signal, actionsRan);
+    return await executeTool(request.tool, request.arguments, signal, toolContext);
   } catch (error) {
     const reason = error instanceof Error ? error.message : "unknown failure";
 
@@ -623,20 +812,16 @@ function echoedAssistant(result: ModelResult, calls: NativeCall[]): Message {
 // ---------------------------------------------------------------------------
 
 /**
- * Keep segments that are natural-language speech. A segment that still
- * looks like tool-call JSON or leaked tool-result text is dropped here as
- * well; the pipeline has already withheld such segments upstream.
+ * Keep segments that are natural-language speech. A segment that still looks
+ * like tool-call JSON or leaked tool-result text is dropped here as well;
+ * the speak path already withheld such utterances (`speech-integrity.ts`),
+ * so this final sweep shares the same predicate instead of restating it.
  */
 function speakableSegments(segments: string[]): string[] {
   return segments.filter((segment) => {
     const text = segment.trim();
 
-    return (
-      !!text &&
-      !text.startsWith('[{"tool"') &&
-      !text.startsWith('{"tool"') &&
-      !text.includes("UNTRUSTED_")
-    );
+    return !!text && !looksLikeToolCall(text) && !text.includes("UNTRUSTED_");
   });
 }
 
@@ -650,6 +835,7 @@ function finalize(
   state: TurnState,
   toolRounds: number,
   seen: TurnCallbacks,
+  mode: AccessMode | null,
   debug?: DebugCapture,
 ): OmniTurn {
   const segments = speakableSegments(state.speakSegments);
@@ -665,12 +851,17 @@ function finalize(
     seen.onSpeakDelta?.(segment);
   }
 
+  const cards = capabilitiesFor(mode).cards && !state.newSession ? state.cards : [];
+
   return {
     transcript: state.transcript,
     speak,
     meta: metaFrom(result, toolRounds),
-    sources: selectReplySources(joinCardMarkdown(state.cards), state.sources),
-    cards: state.cards,
+    sources: selectReplySources(joinCardMarkdown(cards), state.sources),
+    cards,
+    ...(state.newSession ? { newSession: true as const } : {}),
+    ...(state.reminders.length > 0 ? { reminders: state.reminders } : {}),
+    ...(state.moods.length > 0 ? { moods: state.moods } : {}),
     ...(debug && debug.rounds.length > 0
       ? { debug: { rounds: debug.rounds } }
       : {}),
@@ -709,10 +900,11 @@ async function runModelTurn(
   messages: Message[],
   callbacks: TurnCallbacks,
   run: TurnRun,
+  tools: readonly OrbTool[],
   options: TurnOptions = {},
 ): Promise<ModelResult> {
   let result = await callModel(apiKey, messages, run, {
-    tools: options.allowTools !== false,
+    tools: options.allowTools !== false ? tools : undefined,
     forceSpeak: options.forceSpeak,
   });
 
@@ -725,11 +917,11 @@ async function runModelTurn(
         {
           role: "user",
           content:
-            "Your previous answer was cut off. Use the speak tool to finish with a focused plain-text answer now.",
+            "Your previous reply was cut off mid-call. Redo that call so it completes in one piece: leaner card content, or fewer cards this round, keeping the substance. If only the words remain, finish with the speak tool.",
         },
       ],
       run,
-      { tools: true, forceSpeak: true },
+      { tools },
     );
   }
 
@@ -744,7 +936,7 @@ async function callModel(
   apiKey: string,
   messages: Message[],
   run: TurnRun,
-  options: { tools?: boolean; forceSpeak?: boolean } = {},
+  options: { tools?: readonly OrbTool[]; forceSpeak?: boolean } = {},
 ): Promise<ModelResult> {
   const startedAt = performance.now();
   const response = await postModel(
@@ -753,16 +945,16 @@ async function callModel(
       model: BASETEN_MODEL,
       messages,
       max_tokens: DEFAULT_MAX_REPLY_TOKENS,
-      temperature: 0.3,
+      temperature: 0.1,
       reasoning_effort: REASONING_EFFORT,
-      ...(options.tools
+      ...(options.tools && options.tools.length > 0
         ? options.forceSpeak
           ? {
               tools: SPEAK_ONLY_TOOLS,
               tool_choice: { type: "function", function: { name: "speak" } },
             }
           : {
-              tools: ORB_TOOLS,
+              tools: options.tools,
               tool_choice: "auto",
               parallel_tool_calls: true,
             }
@@ -792,7 +984,7 @@ async function callModel(
       round: run.debug.rounds.length + 1,
       atMs: Math.round(performance.now() - run.debug.startedAt),
       ms: Math.round(performance.now() - startedAt),
-      tools: options.tools !== false,
+      tools: (options.tools?.length ?? 0) > 0,
       response: payload,
     });
   }

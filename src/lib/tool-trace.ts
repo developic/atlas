@@ -10,6 +10,12 @@ export const TOOL_TRACE_NAMES = [
   "websearch",
   "webfetch",
   "get_current_time",
+  "start_new_chat",
+  "open_camera",
+  "shutdown",
+  "reminder",
+  "mood",
+  "frame",
 ] as const;
 
 export type ToolTraceName = (typeof TOOL_TRACE_NAMES)[number];
@@ -68,6 +74,12 @@ const TOOL_LABELS: Record<
   websearch: { running: "Searching the web", done: "Searched the web" },
   webfetch: { running: "Fetching", done: "Fetched" },
   get_current_time: { running: "Checking the time", done: "Checked the time" },
+  start_new_chat: { running: "Starting new chat", done: "Started new chat" },
+  open_camera: { running: "Opening camera", done: "Opened camera" },
+  shutdown: { running: "Shutting down", done: "Shut down" },
+  reminder: { running: "Saving reminder", done: "Saved reminder" },
+  mood: { running: "Noting mood", done: "Noted mood" },
+  frame: { running: "Looking at the camera", done: "Looked at the camera" },
 };
 
 /**
@@ -81,7 +93,14 @@ export function toolTraceLabel(
   const labels = TOOL_LABELS[trace.tool];
   const detail = trace.detail?.trim();
 
-  if (!detail || trace.tool === "get_current_time") return labels[phase];
+  if (
+    !detail ||
+    trace.tool === "get_current_time" ||
+    trace.tool === "start_new_chat" ||
+    trace.tool === "open_camera" ||
+    trace.tool === "shutdown"
+  )
+    return labels[phase];
 
   const short = shortenMiddle(detail, LABEL_DETAIL_CHARS);
 

@@ -13,7 +13,7 @@ function WidgetError({ raw, reason }: { raw: string; reason: string }) {
   return (
     <p
       role="note"
-      className="my-2 rounded-lg border border-destructive/30 bg-destructive/5 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-destructive"
+      className="my-1.5 rounded-lg border border-destructive/30 bg-destructive/5 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-destructive"
     >
       Could not render{" "}
       <code className="break-all">{raw.length > 120 ? `${raw.slice(0, 120)}…` : raw}</code>:{" "}
@@ -33,7 +33,7 @@ export function InteractiveMarkdown({ content }: { content: string }) {
   const { blocks } = parseInteractiveMarkdown(content);
 
   return (
-    <div className="flex min-w-0 flex-col gap-3">
+    <div className="flex min-w-0 flex-col gap-1">
       {blocks.map((block, index) => {
         if (block.type === "markdown") {
           return <Markdown key={index} content={block.value} />;

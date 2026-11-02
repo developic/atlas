@@ -1,4 +1,6 @@
 import type { CardContent } from "../cards";
+import type { MoodDirective, MoodSnapshotItem } from "../moods";
+import type { ReminderDirective, ReminderSnapshotItem } from "../reminders";
 import type { SourceLink } from "../source-links";
 
 /**
@@ -8,9 +10,30 @@ import type { SourceLink } from "../source-links";
 export const CITATION_INSTRUCTION =
   "Cite source URLs inside the create card that uses them, as markdown links whose label is the result title, not the URL.";
 
-export const ORB_TOOL_NAMES = ["websearch", "webfetch", "get_current_time", "create", "speak"] as const;
+export const ORB_TOOL_NAMES = ["websearch", "webfetch", "get_current_time", "create", "start_new_chat", "open_camera", "shutdown", "speak", "reminder", "mood", "frame"] as const;
 
 export type OrbToolName = (typeof ORB_TOOL_NAMES)[number];
+
+/**
+ * Server-side context a turn threads to tool runners: the authoritative
+ * clock, the client's time zone for wall-clock phrases, and the pending
+ * reminder snapshot for list/find/existence checks. Everything stays optional
+ * so existing runners ignore it.
+ */
+export type ToolContext = {
+  now?: number;
+  timeZone?: string;
+  snapshot?: ReminderSnapshotItem[];
+  /**
+   * Tools the selected access mode permits. The registry refuses anything
+   * outside this list, so hiding a tool from the model is not the only guard.
+   */
+  allowedTools?: readonly OrbToolName[];
+  /** Recent mood entries from the client's private log, oldest first. */
+  moods?: MoodSnapshotItem[];
+  /** Whether the client's camera is live at the start of this turn. */
+  cameraOn?: boolean;
+};
 
 export type ToolResult = {
   content: string;
@@ -18,6 +41,12 @@ export type ToolResult = {
   sources: SourceLink[];
   /** Every on-screen card produced by the create tool, in order. */
   cards?: CardContent[];
+  /** Set by start_new_chat; the client clears old history and cards. */
+  newSession?: boolean;
+  /** Set by reminder mutations; the client applies it to its store. */
+  reminder?: ReminderDirective;
+  /** Set by a mood log; the client writes it to the private mood store. */
+  mood?: MoodDirective;
 };
 
 export type ToolOutcome =

@@ -16,6 +16,7 @@ export {
   type ToolParse,
   type ToolParameter,
   type ToolRequest,
+  type ToolContext,
   type ToolOutcome,
   type ToolResult,
 } from "./types";
@@ -46,15 +47,48 @@ import {
   WEBSEARCH_ARG_LIMITS,
 } from "./websearch";
 import { createTool, CREATE_LIMITS, runCreate } from "./create";
+import {
+  runStartNewChat,
+  START_NEW_CHAT_ARG_LIMITS,
+  startNewChatTool,
+} from "./start-new-chat";
+import {
+  openCameraTool,
+  OPEN_CAMERA_ARG_LIMITS,
+  runOpenCamera,
+} from "./open-camera";
+import { runShutdown, SHUTDOWN_ARG_LIMITS, shutdownTool } from "./shutdown";
+import { REMINDER_ARG_LIMITS, reminderTool, runReminder } from "./reminder";
+import { MOOD_ARG_LIMITS, moodTool, runMood } from "./mood";
+import { frameTool, runFrame } from "./frame";
 import { runSpeak, speakTool } from "./speak";
+import type { AccessMode } from "../access-modes";
+import { toolsForMode } from "../access-modes";
 
 export const ORB_TOOLS: readonly OrbTool[] = [
   websearchTool,
   webfetchTool,
   currentTimeTool,
   createTool,
+  startNewChatTool,
+  openCameraTool,
+  shutdownTool,
   speakTool,
+  reminderTool,
+  moodTool,
+  frameTool,
 ];
+
+/**
+ * The tools a mode may use, in registry order. `null` means accessibility is
+ * off and every tool is available. The same list feeds the prompt, the
+ * provider request, and the server-side permission check.
+ */
+export function toolsFor(mode: AccessMode | null): readonly OrbTool[] {
+  const names = toolsForMode(mode);
+
+  return ORB_TOOLS.filter((tool) => names.includes(tool.function.name));
+}
 
 /**
  * Per-argument caps. A single global cap corrupted a valid long URL, so each
@@ -65,7 +99,12 @@ const ARG_LIMITS: Partial<Record<OrbToolName, Record<string, number>>> = {
   webfetch: WEBFETCH_ARG_LIMITS,
   get_current_time: CURRENT_TIME_ARG_LIMITS,
   create: CREATE_LIMITS,
+  start_new_chat: START_NEW_CHAT_ARG_LIMITS,
+  open_camera: OPEN_CAMERA_ARG_LIMITS,
+  shutdown: SHUTDOWN_ARG_LIMITS,
   speak: { text: 4_000 },
+  reminder: REMINDER_ARG_LIMITS,
+  mood: MOOD_ARG_LIMITS,
 };
 const MAX_TRANSCRIPT_ARG_CHARS = 4_000;
 
@@ -125,6 +164,16 @@ export function validateToolArgs(
 
     if (typeof raw === "string" && raw.trim()) {
       args[key] = raw.trim().slice(0, argumentLimit(toolName, key));
+      continue;
+    }
+
+    // Native tool calls carry JSON, so a numeric argument arrives as a number
+    // even when the schema declares a string (a mood score, snooze minutes).
+    // Converting the same value is not coercion of unknown data: the tool
+    // parser still validates it. Dropping it silently made the model repeat
+    // the identical call forever.
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+      args[key] = String(raw).slice(0, argumentLimit(toolName, key));
       continue;
     }
 
@@ -397,8 +446,8 @@ function argumentShape(key: string, parameter: ToolParameter, required: string[]
   return `${name}:[{${fields}}]`;
 }
 
-export function renderToolPrompt(): string {
-  const lines = ORB_TOOLS.map((tool) => {
+export function renderToolPrompt(tools: readonly OrbTool[]): string {
+  const lines = tools.map((tool) => {
     const args = Object.entries(tool.function.parameters.properties)
       .map(([key, parameter]) =>
         argumentShape(key, parameter, tool.function.parameters.required),
@@ -418,13 +467,19 @@ async function dispatchTool(
   name: string,
   args: Record<string, string>,
   signal?: AbortSignal,
-  actionsRan = false,
+  toolContext?: import("./types").ToolContext,
 ): Promise<import("./types").ToolOutcome> {
   if (name === "websearch") return runWebsearch(args, signal);
   if (name === "webfetch") return runWebfetch(args, signal);
   if (name === "get_current_time") return runCurrentTime(args);
   if (name === "create") return runCreate(args);
-  if (name === "speak") return runSpeak(args, actionsRan);
+  if (name === "start_new_chat") return runStartNewChat(args);
+  if (name === "open_camera") return runOpenCamera(args);
+  if (name === "shutdown") return runShutdown(args);
+  if (name === "speak") return runSpeak(args);
+  if (name === "reminder") return runReminder(args, toolContext);
+  if (name === "mood") return runMood(args, toolContext);
+  if (name === "frame") return runFrame(args, toolContext);
 
   return {
     ok: false,
@@ -441,9 +496,16 @@ export async function executeTool(
   name: string,
   args: Record<string, string>,
   signal?: AbortSignal,
-  actionsRan = false,
+  toolContext?: import("./types").ToolContext,
 ): Promise<ToolOutcome> {
-  return dispatchTool(name, args, signal, actionsRan);
+  if (toolContext?.allowedTools && !toolContext.allowedTools.includes(name as OrbToolName)) {
+    return {
+      ok: false,
+      error: `${name} is not available in this access mode. Use only the tools listed in the prompt.`,
+    };
+  }
+
+  return dispatchTool(name, args, signal, toolContext);
 }
 
 /** The historical `ToolResult` wrapper: failures become readable content. */
@@ -451,9 +513,9 @@ export async function runToolWithSources(
   name: string,
   args: Record<string, string>,
   signal?: AbortSignal,
-  actionsRan = false,
+  toolContext?: import("./types").ToolContext,
 ): Promise<ToolResult> {
-  const outcome = await executeTool(name, args, signal, actionsRan);
+  const outcome = await executeTool(name, args, signal, toolContext);
 
   return outcome.ok ? outcome.result : { content: outcome.error, sources: [] };
 }

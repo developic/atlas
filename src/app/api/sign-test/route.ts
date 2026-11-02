@@ -29,15 +29,16 @@ export async function POST(request: Request) {
       return Response.json({ error: "Attach a video file first." }, { status: 400 });
     }
 
-    const buffer = assertSignVideo(
+    const clip = assertSignVideo(
       Buffer.from(await file.arrayBuffer()),
       file.type,
     );
 
     const result = await transcribeSigningVideo(
-      buffer,
+      clip.buffer,
       typeof prompt === "string" && prompt.trim() ? prompt : DEFAULT_SIGN_PROMPT,
       request.signal,
+      clip.mimeType,
     );
 
     return Response.json(result);

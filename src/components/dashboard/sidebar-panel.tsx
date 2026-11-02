@@ -19,11 +19,11 @@ export function SidebarPanel({ card, className }: { card: CardContent; className
         className,
       )}
     >
-      <p className="mb-2 flex items-center gap-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-sage-text">
+      <p className="mb-1.5 flex items-center gap-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-sage-text">
         <span aria-hidden="true">◆</span>
         <span className="truncate">{card.title}</span>
       </p>
-      <div className="max-h-[min(46vh,420px)] overflow-y-auto overflow-x-hidden text-sm leading-relaxed text-ink [scrollbar-gutter:stable]">
+      <div className="max-h-[min(46vh,420px)] overflow-y-auto overflow-x-hidden text-sm leading-snug text-ink [scrollbar-gutter:stable]">
         <InteractiveMarkdown content={card.content} />
       </div>
     </section>

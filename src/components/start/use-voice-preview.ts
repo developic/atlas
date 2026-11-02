@@ -8,61 +8,11 @@ import {
   type DeepgramVoiceId,
 } from "@/lib/deepgram";
 
-export type VoiceOption = {
-  id: DeepgramVoiceId;
-  name: string;
-  gender: "Female" | "Male";
-  lang: "US" | "UK";
-  description: string;
-};
+/** The one Atlas voice. Samples live at `/voices/skylar-{pace}.mp3`. */
+export const ATLAS_VOICE_ID: DeepgramVoiceId = "skylar";
 
-const VOICE_OPTIONS: VoiceOption[] = [
-  {
-    id: "skylar",
-    name: "Skylar",
-    gender: "Female",
-    lang: "US",
-    description: "Friendly and approachable",
-  },
-  {
-    id: "jacqueline",
-    name: "Jacqueline",
-    gender: "Female",
-    lang: "US",
-    description: "Warm and reassuring",
-  },
-  {
-    id: "gemma",
-    name: "Gemma",
-    gender: "Female",
-    lang: "UK",
-    description: "Confident and emotive",
-  },
-  {
-    id: "daniel",
-    name: "Daniel",
-    gender: "Male",
-    lang: "US",
-    description: "Clear and crisp",
-  },
-  {
-    id: "parker",
-    name: "Parker",
-    gender: "Male",
-    lang: "US",
-    description: "Supportive and casual",
-  },
-  {
-    id: "archie",
-    name: "Archie",
-    gender: "Male",
-    lang: "UK",
-    description: "Warm and conversational",
-  },
-];
-
-function sampleSource(voiceId: DeepgramVoiceId, pace: DeepgramPace) {
-  return `/voices/${voiceId}-${pace}.mp3`;
+function sampleSource(pace: DeepgramPace) {
+  return `/voices/${ATLAS_VOICE_ID}-${pace}.mp3`;
 }
 
 export function useVoicePreview() {
@@ -131,14 +81,10 @@ export function useVoicePreview() {
   );
 
   const play = useCallback(
-    (
-      voiceId: DeepgramVoiceId | null,
-      pace: DeepgramPace = "steady",
-      requestId: string | null = voiceId,
-    ) => {
-      if (!voiceId || !(voiceId in DEEPGRAM_VOICES)) return;
+    (pace: DeepgramPace = "steady", requestId: string | null = pace) => {
+      if (!(ATLAS_VOICE_ID in DEEPGRAM_VOICES)) return;
 
-      startAudio(sampleSource(voiceId, pace), requestId);
+      startAudio(sampleSource(pace), requestId);
     },
     [startAudio],
   );
@@ -161,7 +107,6 @@ export function useVoicePreview() {
   }, [releaseObjectUrl]);
 
   return {
-    voices: VOICE_OPTIONS,
     supported: typeof window !== "undefined" && "Audio" in window,
     speakingId,
     play,

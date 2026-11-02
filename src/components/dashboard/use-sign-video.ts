@@ -31,10 +31,10 @@ export type SignRecordingState = "idle" | "recording" | "ready";
 /** Longest clip we keep, so a forgotten recording cannot grow forever. */
 const RECORD_LIMIT_MS = 30_000;
 const MIME_TYPES = [
+  "video/mp4",
   "video/webm;codecs=vp9",
   "video/webm;codecs=vp8",
   "video/webm",
-  "video/mp4",
 ];
 const PROMPT_TIMEOUT = 10_000;
 
@@ -53,6 +53,62 @@ function isDenied(error: unknown) {
     error instanceof DOMException &&
     (error.name === "NotAllowedError" || error.name === "SecurityError")
   );
+}
+
+/**
+ * A plain `video: true` opens the rear camera on most phones. On mobile the
+ * rear camera is requested first — exact facing mode, then the ideal hint,
+ * then any camera — because it gives the wider, steadier frame signing needs
+ * and is not a mirrored selfie. Desktop keeps the usual webcam preference.
+ */
+function isMobileBrowser(): boolean {
+  if (typeof navigator === "undefined") return false;
+
+  const uaData = (
+    navigator as Navigator & { userAgentData?: { mobile?: boolean } }
+  ).userAgentData;
+
+  if (typeof uaData?.mobile === "boolean") return uaData.mobile;
+
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+}
+
+function cameraAttempts(): MediaTrackConstraints[] {
+  const sized = { width: { ideal: 640 } };
+
+  return isMobileBrowser()
+    ? [
+        { facingMode: { exact: "environment" }, ...sized },
+        { facingMode: "environment", ...sized },
+        {},
+      ]
+    : [{ facingMode: "user", ...sized }, {}];
+}
+
+/** A constraint the device cannot satisfy; trying the next attempt is safe. */
+function isRetryableCameraError(error: unknown): boolean {
+  return (
+    error instanceof DOMException &&
+    (error.name === "OverconstrainedError" ||
+      error.name === "NotFoundError" ||
+      error.name === "DevicesNotFoundError")
+  );
+}
+
+async function openCameraStream(): Promise<MediaStream> {
+  let lastError: unknown = null;
+
+  for (const video of cameraAttempts()) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ video, audio: false });
+    } catch (error) {
+      lastError = error;
+
+      if (!isRetryableCameraError(error)) throw error;
+    }
+  }
+
+  throw lastError ?? new Error("No camera is available.");
 }
 
 /** Tell the user what actually went wrong, so they can fix it. */
@@ -93,6 +149,7 @@ export function useSignVideo() {
   const chunksRef = useRef<Blob[]>([]);
   const recordTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [status, setStatus] = useState<SignVideoStatus>("idle");
+  const [facing, setFacing] = useState<"user" | "environment" | null>(null);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const [recording, setRecording] = useState<SignRecordingState>("idle");
   const [clipBlob, setClipBlob] = useState<Blob | null>(null);
@@ -148,6 +205,7 @@ export function useSignVideo() {
     discardRecording();
     stopTracks();
     setErrorDetail(null);
+    setFacing(null);
     setStatus("idle");
   }, [clearWatchdog, discardRecording, stopTracks]);
 
@@ -162,6 +220,12 @@ export function useSignVideo() {
     },
     [],
   );
+
+  /** The live preview element, for frame sampling (blind obstacle guard). */
+  const getVideo = useCallback(() => videoElRef.current, []);
+
+  /** The live camera stream, for clip recording (blind obstacle guard). */
+  const getStream = useCallback(() => streamRef.current, []);
 
   const enable = useCallback(async () => {
     if (streamRef.current || pendingRef.current) return;
@@ -182,19 +246,7 @@ export function useSignVideo() {
       if (pendingRef.current === token) setStatus("waiting");
     }, PROMPT_TIMEOUT);
 
-    let stream: MediaStream | null = null;
-
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user", width: { ideal: 640 } },
-        audio: false,
-      });
-
-      if (tokenRef.current !== token || !mountedRef.current) {
-        for (const track of stream.getTracks()) track.stop();
-        return;
-      }
-
+    const goLive = (stream: MediaStream) => {
       streamRef.current = stream;
 
       const video = videoElRef.current;
@@ -209,6 +261,9 @@ export function useSignVideo() {
       setStatus("live");
 
       const track = stream.getVideoTracks()[0];
+      const mode = track?.getSettings().facingMode;
+      setFacing(mode === "user" || mode === "environment" ? mode : null);
+
       const handleTrackEnded = () => {
         if (tokenRef.current !== token || !mountedRef.current) return;
 
@@ -220,59 +275,22 @@ export function useSignVideo() {
         track.onended = handleTrackEnded;
         if (track.readyState === "ended") handleTrackEnded();
       }
+    };
+
+    try {
+      const stream = await openCameraStream();
+
+      if (tokenRef.current !== token || !mountedRef.current) {
+        for (const track of stream.getTracks()) track.stop();
+        return;
+      }
+
+      goLive(stream);
     } catch (error) {
       clearWatchdog();
       pendingRef.current = 0;
 
-      for (const track of stream?.getTracks() ?? []) track.stop();
-
       if (tokenRef.current === token && mountedRef.current) {
-        // Over-constrained ideal values fail on some laptops: retry once
-        // with plain video before giving up.
-        if (error instanceof DOMException && error.name === "OverconstrainedError") {
-          try {
-            stream = await navigator.mediaDevices.getUserMedia({
-              video: true,
-              audio: false,
-            });
-
-            if (tokenRef.current !== token || !mountedRef.current) {
-              for (const track of stream.getTracks()) track.stop();
-              return;
-            }
-
-            streamRef.current = stream;
-
-            const video = videoElRef.current;
-            if (video) {
-              video.srcObject = stream;
-              void video.play().catch(() => {});
-            }
-
-            clearWatchdog();
-            pendingRef.current = 0;
-            setErrorDetail(null);
-            setStatus("live");
-
-            const track = stream.getVideoTracks()[0];
-            const handleTrackEnded = () => {
-              if (tokenRef.current !== token || !mountedRef.current) return;
-
-              disable();
-              setStatus("disconnected");
-            };
-
-            if (track) {
-              track.onended = handleTrackEnded;
-              if (track.readyState === "ended") handleTrackEnded();
-            }
-
-            return;
-          } catch {
-            // Fall through to the specific message below.
-          }
-        }
-
         if (isDenied(error)) {
           setErrorDetail(null);
           setStatus("denied");
@@ -400,10 +418,13 @@ export function useSignVideo() {
 
   return {
     status,
+    facing,
     errorDetail,
     recording,
     clipBlob,
     attachVideo,
+    getVideo,
+    getStream,
     toggleCamera,
     disableCamera: disable,
     startRecording,

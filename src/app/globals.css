@@ -2,8 +2,6 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-@custom-variant dark (&:is(.dark *));
-
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -107,53 +105,6 @@
   --sidebar-accent-foreground: #3c685c;
   --sidebar-border: #e7e1d6;
   --sidebar-ring: #3e6a5e;
-}
-
-.dark {
-  --background: #171512;
-  --foreground: #f2eee6;
-  --sand: #171512;
-  --paper: #211e19;
-  --paper-2: #29251f;
-  --ink: #f2eee6;
-  --ink-muted: #b9b0a2;
-  --line: #39332b;
-  --sage: #8cc9b7;
-  --sage-text: #a6dac9;
-  --sage-strong: #6cae9b;
-  --sage-wash: #25322d;
-  --stage-glow: #262119;
-  --stage-edge: #0f0d0a;
-  --card: #211e19;
-  --card-foreground: #f2eee6;
-  --popover: #29251f;
-  --popover-foreground: #f2eee6;
-  --primary: #9ed4c2;
-  --primary-foreground: #171512;
-  --secondary: #25322d;
-  --secondary-foreground: #a6dac9;
-  --muted: #2c2822;
-  --muted-foreground: #b9b0a2;
-  --accent: #25322d;
-  --accent-foreground: #a6dac9;
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: #39332b;
-  --input: #39332b;
-  --ring: #8cc9b7;
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: #211e19;
-  --sidebar-foreground: #f2eee6;
-  --sidebar-primary: #9ed4c2;
-  --sidebar-primary-foreground: #171512;
-  --sidebar-accent: #25322d;
-  --sidebar-accent-foreground: #a6dac9;
-  --sidebar-border: #39332b;
-  --sidebar-ring: #8cc9b7;
-  color-scheme: dark;
 }
 
 /* Shared page gutter: grows with the viewport and never sits under a notch. */
@@ -429,11 +380,6 @@
   opacity: 0.035;
 }
 
-.dark .orb-stage-grain {
-  mix-blend-mode: soft-light;
-  opacity: 0.05;
-}
-
 .orb-halo {
   opacity: 0.55;
   transform: scale(1);
@@ -450,23 +396,9 @@
   will-change: opacity, transform;
 }
 
-.dark .orb-halo {
-  background: radial-gradient(
-    circle,
-    color-mix(in oklab, var(--stage-halo) 30%, transparent) 0%,
-    color-mix(in oklab, var(--stage-halo) 10%, transparent) 46%,
-    transparent 74%
-  );
-  mix-blend-mode: screen;
-}
-
 .orb-stage-ring {
   border: 1px solid color-mix(in oklab, var(--sage) 16%, transparent);
   border-radius: 9999px;
-}
-
-.dark .orb-stage-ring {
-  border-color: color-mix(in oklab, var(--sage) 10%, transparent);
 }
 
 .orb-stage-ground {
@@ -477,15 +409,6 @@
     transparent 72%
   );
   filter: blur(10px);
-}
-
-.dark .orb-stage-ground {
-  background: radial-gradient(
-    ellipse at center,
-    rgb(140 201 183 / 0.12) 0%,
-    rgb(140 201 183 / 0.04) 46%,
-    transparent 72%
-  );
 }
 
 .orb-stage-in {
@@ -533,3 +456,191 @@
   }
 }
 
+/* Header commute + team blobs as Tailwind v4 animation tokens. Each
+ * traveler, bob, spin, stride, and dance step is an `animate-*` utility;
+ * reduced motion is handled per-element with `motion-reduce:` variants.
+ * Decorative only; the header stays a server component. */
+@theme {
+  --animate-commute-rider: commute-seq 36s ease-in-out infinite;
+  --animate-commute-walker: commute-seq 36s ease-in-out -24s infinite;
+  --animate-commute-autism: commute-seq 36s ease-in-out -12s infinite;
+  --animate-commute-bob: commute-bob 12s ease-in-out infinite;
+  --animate-commute-spin: commute-spin 1.6s linear infinite;
+  --animate-commute-spin-fast: commute-spin 0.8s linear infinite;
+  --animate-walker-bob: walker-bob 1.2s ease-in-out infinite;
+  --animate-cane-sweep: cane-sweep 1.2s ease-in-out infinite;
+  --animate-step-a: step-a 1.2s linear infinite;
+  --animate-step-b: step-b 1.2s linear infinite;
+  --animate-dance-bob: dance-bob 0.9s ease-in-out infinite;
+  --animate-dance-a: dance-a 0.9s linear infinite;
+  --animate-dance-b: dance-b 0.9s linear infinite;
+  --animate-blob-float: blob-float 7s ease-in-out infinite;
+
+  @keyframes commute-seq {
+    0% {
+      left: 9rem;
+      margin-top: -16px;
+      opacity: 0;
+    }
+    2.5% {
+      opacity: 1;
+    }
+    10% {
+      margin-top: -13px;
+    }
+    13.75% {
+      margin-top: 0;
+      opacity: 1;
+    }
+    17.5% {
+      margin-top: -13px;
+    }
+    20.5% {
+      left: calc(100% - 10rem);
+      margin-top: -16px;
+      opacity: 1;
+    }
+    21.75% {
+      left: calc(100% - 10rem);
+      margin-top: -13px;
+      opacity: 1;
+    }
+    23% {
+      left: calc(100% - 10rem);
+      margin-top: -16px;
+      opacity: 1;
+    }
+    24.25%,
+    25% {
+      left: calc(100% - 9.5rem);
+      margin-top: -20px;
+      opacity: 0;
+    }
+    26%,
+    100% {
+      left: 9rem;
+      margin-top: -16px;
+      opacity: 0;
+    }
+  }
+  /* Four push strokes across the journey, calm at the start and arrival. */
+  @keyframes commute-bob {
+    0%,
+    8%,
+    74%,
+    100% {
+      transform: translateY(0) rotate(0deg);
+    }
+    13%,
+    29%,
+    45%,
+    61% {
+      transform: translateY(1.4px) rotate(-1.4deg);
+    }
+    19%,
+    35%,
+    51%,
+    67% {
+      transform: translateY(-0.6px) rotate(0.6deg);
+    }
+  }
+  @keyframes commute-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @keyframes walker-bob {
+    0%,
+    50%,
+    100% {
+      transform: translateY(0) rotate(0deg);
+    }
+    12%,
+    62% {
+      transform: translateY(1.3px) rotate(-0.8deg);
+    }
+  }
+  @keyframes cane-sweep {
+    0%,
+    100% {
+      transform: rotate(5deg);
+    }
+    50% {
+      transform: rotate(-5deg);
+    }
+  }
+  @keyframes step-a {
+    0%,
+    42% {
+      opacity: 1;
+    }
+    50%,
+    92% {
+      opacity: 0;
+    }
+    100% {
+      opacity: 1;
+    }
+  }
+  @keyframes step-b {
+    0%,
+    42% {
+      opacity: 0;
+    }
+    50%,
+    92% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0;
+    }
+  }
+  @keyframes dance-bob {
+    0%,
+    50%,
+    100% {
+      transform: translateY(0) rotate(0deg);
+    }
+    25% {
+      transform: translateY(2px) rotate(1.5deg);
+    }
+    75% {
+      transform: translateY(2px) rotate(-1.5deg);
+    }
+  }
+  @keyframes dance-a {
+    0%,
+    42% {
+      opacity: 1;
+    }
+    50%,
+    92% {
+      opacity: 0;
+    }
+    100% {
+      opacity: 1;
+    }
+  }
+  @keyframes dance-b {
+    0%,
+    42% {
+      opacity: 0;
+    }
+    50%,
+    92% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0;
+    }
+  }
+  @keyframes blob-float {
+    0%,
+    100% {
+      transform: translateY(0) rotate(0deg);
+    }
+    50% {
+      transform: translateY(-9px) rotate(1.5deg);
+    }
+  }
+}

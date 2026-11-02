@@ -16,7 +16,9 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-export type ChatboxAttachment = { name: string; size: number };
+import { checkAttachment } from "@/lib/attach-file";
+
+export type ChatboxAttachment = { file: File; name: string; size: number };
 
 export const formatSize = (bytes: number): string =>
   bytes < 1024 ? `${bytes} B` : `${Math.round(bytes / 1024)} KB`;
@@ -29,7 +31,7 @@ const onTextareaKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
 };
 
 type ChatboxProps = {
-  onSendText?: (text: string) => Promise<void>;
+  onSendText?: (text: string, file?: File) => Promise<void>;
   helperName?: string;
   formId?: string;
 };
@@ -67,6 +69,7 @@ export function Chatbox({
 }: ChatboxProps) {
   const [text, setText] = useState("");
   const [attachment, setAttachment] = useState<ChatboxAttachment | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -117,11 +120,12 @@ export function Chatbox({
     const words = text.trim();
     if (!words || sending) return;
 
-    // The turn takes text only: an attachment rides along as a named
-    // reference so the history shows what was picked.
-    const message = attachment ? `${words} (attached: ${attachment.name})` : words;
+    // A text attachment rides along as content; an image rides the media
+    // frames. Either way the file itself travels, not just its name.
+    const file = attachment?.file;
     setText("");
     setAttachment(null);
+    setFileError(null);
     setMenuOpen(false);
     setSending(true);
     // Keep the field out after submitting, so the next message can be typed
@@ -129,7 +133,7 @@ export function Chatbox({
     textareaRef.current?.focus({ preventScroll: true });
 
     try {
-      await onSendText(message);
+      await onSendText(words, file);
     } finally {
       setSending(false);
     }
@@ -170,7 +174,17 @@ export function Chatbox({
     const file = fileRef.current?.files?.[0];
     if (fileRef.current) fileRef.current.value = "";
     if (!file) return;
-    setAttachment({ name: file.name, size: file.size });
+
+    const checked = checkAttachment(file);
+
+    if (!checked.ok) {
+      setAttachment(null);
+      setFileError(checked.error);
+      return;
+    }
+
+    setFileError(null);
+    setAttachment({ file, name: file.name, size: file.size });
   };
 
   return (
@@ -251,13 +265,21 @@ export function Chatbox({
               </span>
               <button
                 type="button"
-                onClick={() => setAttachment(null)}
+                onClick={() => {
+                  setAttachment(null);
+                  setFileError(null);
+                }}
                 aria-label={`Remove ${attachment.name}`}
                 className="inline-flex size-11 items-center justify-center rounded-full text-ink-muted"
               >
                 <X aria-hidden="true" className="size-4" strokeWidth={2.5} />
               </button>
             </div>
+          ) : null}
+          {fileError ? (
+            <p role="alert" className="px-4 pt-1 pb-2 text-sm text-ink-muted">
+              {fileError}
+            </p>
           ) : null}
           <div className="flex items-end gap-1">
             <button

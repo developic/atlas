@@ -110,7 +110,7 @@ export function AdaptiveCard({
         )}
       >
         <div className="min-h-0 overflow-hidden">
-          <div className="max-h-[min(42vh,24rem)] overflow-y-auto border-t border-line px-3 py-3 text-sm leading-relaxed text-ink [scrollbar-gutter:stable]">
+          <div className="max-h-[min(42vh,24rem)] overflow-y-auto border-t border-line px-3 py-1.5 text-sm leading-snug text-ink [scrollbar-gutter:stable]">
             <InteractiveMarkdown content={card.content} />
           </div>
         </div>

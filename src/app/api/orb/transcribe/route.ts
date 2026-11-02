@@ -2,8 +2,10 @@ import {
   assertSignVideo,
   DEFAULT_SIGN_PROMPT,
   SignVideoError,
+  acceptableSignUtterance,
   transcribeSigningVideo,
 } from "@/lib/sign-video";
+import { capabilitiesFor, isAccessMode } from "@/lib/access-modes";
 
 const MAX_VIDEO_BYTES = 15 * 1024 * 1024;
 
@@ -13,6 +15,10 @@ const MAX_VIDEO_BYTES = 15 * 1024 * 1024;
  * Only the transcription prompt is sent with the video — never the Atlas
  * system prompt. The returned text enters the normal turn as if typed, so
  * the full prompt, tools, cards, and speech all apply there.
+ *
+ * Sign recognition is a permissioned capability: the request must name the
+ * selected mode (mute or deaf only) and carry the user's consent flag. The
+ * normal camera path (`open_camera`) does not depend on this route.
  */
 export async function POST(request: Request) {
   try {
@@ -25,6 +31,23 @@ export async function POST(request: Request) {
     }
 
     const file = form.get("video");
+    const mode = form.get("mode");
+
+    // Sign recognition is a permissioned capability: mute and deaf only, and
+    // only when the client says signing was explicitly activated.
+    if (!isAccessMode(mode) || !capabilitiesFor(mode).sign) {
+      return Response.json(
+        { error: "Sign recognition is not available in this access mode." },
+        { status: 403 },
+      );
+    }
+
+    if (form.get("consent") !== "1") {
+      return Response.json(
+        { error: "Sign recognition needs your permission first." },
+        { status: 403 },
+      );
+    }
 
     if (!(file instanceof File) || file.size === 0) {
       return Response.json({ error: "Attach a video clip first." }, { status: 400 });
@@ -37,50 +60,27 @@ export async function POST(request: Request) {
       );
     }
 
-    const buffer = assertSignVideo(
+    const clip = assertSignVideo(
       Buffer.from(await file.arrayBuffer()),
       file.type,
     );
 
     const result = await transcribeSigningVideo(
-      buffer,
+      clip.buffer,
       DEFAULT_SIGN_PROMPT,
       request.signal,
+      clip.mimeType,
     );
 
-    // The reply should end with a "Transcription:" line holding the best
-    // reading, but the model renames the final label across runs — so fall
-    // back to the last non-empty line as long as it is short and not a
-    // heading. Only that line enters the turn: the analysis must never be
-    // spoken. A long or missing final line means the read failed: surface a
-    // retry instead of speaking the analysis aloud. A short bare reply (no
-    // analysis at all) is used as-is.
-    const words = (value: string) => value.split(/\s+/).filter(Boolean);
-    // Strip list markers, emphasis, and spoken-output labels from either end.
-    const cleanLabel = (value: string) =>
-      value
-        .replace(/^(?:[A-Za-z][A-Za-z'’\- ]{0,28}:\s*)+/, "")
-        .replace(/^[-\u2022\s]*((?:segment|step|pass)\s+\d+\s*:?\s*)+/i, "")
-        .replace(/^[\s*#_"“”]+|[\s*_"“”]+$/g, "")
-        .trim();
-    const explicit = cleanLabel(
-      result.transcript.match(/(?:^|\n)\s*Transcription:\s*([\s\S]+?)\s*$/im)?.[1] ?? "",
-    );
-    const tailLines = result.transcript
-      .split("\n")
-      .map((line) => line.trim().replace(/^\*+|\*+$/g, "").trim())
-      .filter(Boolean);
-    const tail = tailLines[tailLines.length - 1] ?? "";
-    const isHeading =
-      /^(#{1,6}\s+|\d+\.\s*|pass\s+\d|segments?|signs?|utterance|english\s*:)/i.test(tail);
-    const unlabeled = cleanLabel(tail);
-    const shortTail =
-      unlabeled && !isHeading && words(unlabeled).length <= 12 ? unlabeled : "";
-    const utterance = explicit || shortTail || (words(result.transcript.trim()).length <= 12 ? result.transcript.trim() : "");
+    // `sign-video.ts` returns the structured contract (transcription field +
+    // readable flag), so the analysis can never enter the turn. The remaining
+    // checks are deterministic caps, not wording heuristics: unreadable or
+    // over-long results get a retry instead of a guess.
+    const utterance = acceptableSignUtterance(result.transcript);
 
-    if (!utterance || words(utterance).length > 30 || /^unclear\.?$/i.test(utterance)) {
+    if (!result.readable || !utterance) {
       return Response.json(
-        { error: "I couldn't read that signing. Try again." },
+        { error: "I couldn’t read that signing. Try again." },
         { status: 502 },
       );
     }
