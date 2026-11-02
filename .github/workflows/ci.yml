@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: bun run lint
+      - run: bun run typecheck
+      - run: bun run test
+
+      # Model behavior is validated live (keys never leave the environment):
+      #  - scripts/prompt-eval.mjs  — 12-probe routing smoke
+      #  - bun run eval:live        — scenario harness (dev/held-out sets)
+      #  - bun run probe:omni       — endpoint health
+      # Run these in the release workflow, not here.

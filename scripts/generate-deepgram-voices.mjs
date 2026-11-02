@@ -23,11 +23,6 @@ const OUTPUT_DIR = new URL("../public/voices/", import.meta.url);
 
 const DISPLAY_NAMES = {
   skylar: "Skylar",
-  jacqueline: "Jacqueline",
-  gemma: "Gemma",
-  daniel: "Daniel",
-  parker: "Parker",
-  archie: "Archie",
 };
 
 const key = process.env.DEEPGRAM_API_KEY;
@@ -61,7 +56,7 @@ await mkdir(OUTPUT_DIR, { recursive: true });
 
 let count = 0;
 
-for (const [id, model] of Object.entries(DEEPGRAM_VOICES)) {
+for (const [id, model] of Object.entries(DEEPGRAM_VOICES).filter(([id]) => id === "skylar")) {
   for (const [pace, speed] of Object.entries(DEEPGRAM_PACES)) {
     const audio = await synthesize({
       model,
