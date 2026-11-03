@@ -29,6 +29,8 @@ export const ORB_STATES = [
   'searching',
   'speaking',
   'progressing',
+  'error',
+  'disabled',
 ] as const satisfies readonly OrbState[];
 
 export interface OrbProps {
@@ -37,6 +39,8 @@ export interface OrbProps {
   speed?: number;
   colorFrom?: string;
   colorTo?: string;
+  /** Particle count for the sphere (default 960). Hero sizes want more. */
+  particles?: number;
   levelRef?: RefObject<number>;
   /** Determinate value (0..1) for the `progressing` state's day/night line. */
   progress?: number;
