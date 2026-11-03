@@ -10,6 +10,7 @@ import {
 } from "@/lib/camera-clip";
 import { captureVideoFrame } from "@/lib/media-stills";
 import type { GuardResult, GuardUrgency } from "@/lib/vision-guard";
+import { createCalmUtterance } from "@/lib/browser-voice";
 
 /**
  * Blind-mode obstacle guard.
@@ -62,7 +63,18 @@ function speakWarning(
       // An immediate collision risk should not wait behind other speech.
       if (urgency === "stop") window.speechSynthesis.cancel();
 
-      const utterance = new SpeechSynthesisUtterance(message);
+      // Warnings share the calm boundary but keep a clear, unhurried-brisk
+      // rate: a hazard must be understood fast without sounding panicked.
+      const utterance = createCalmUtterance(
+        message,
+        urgency === "stop" ? "brisk" : "steady",
+      );
+
+      if (!utterance) {
+        resolve();
+        return;
+      }
+
       let finished = false;
       let timer = 0;
 
@@ -73,7 +85,6 @@ function speakWarning(
         resolve();
       };
 
-      utterance.rate = 1.05;
       utterance.onend = finish;
       utterance.onerror = finish;
       // Some browsers never fire `end` for a cancelled utterance.

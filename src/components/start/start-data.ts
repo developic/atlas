@@ -24,8 +24,8 @@ export const DISABILITIES = [
   { value: "prefer-not-to-say", label: "Prefer not to say", helper: "Calm" },
 ] as const;
 
-// The matching samples are generated with Deepgram's `speed`
-// at 0.7, 1, and 1.3. Keep these IDs in sync with that script.
+// The browser voice speaks at these rates (see `lib/browser-voice.ts`),
+// so the onboarding preview is the same tone the reply uses.
 export const PACES = [
   {
     id: "slow",

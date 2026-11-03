@@ -501,7 +501,6 @@ export const webfetchTool: OrbTool = {
   type: "function",
   function: {
     name: "webfetch",
-    strict: true,
     description:
       "Read one specific public web page and return its readable text. Use it when the user gives a URL, or when a search result must be read in full to answer. Do not use it to search, to fetch the same page twice, or for a URL that appears only in your own reply. Returns capped text, never raw HTML.",
     parameters: {

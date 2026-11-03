@@ -2,115 +2,101 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import {
-  DEEPGRAM_VOICES,
-  type DeepgramPace,
-  type DeepgramVoiceId,
-} from "@/lib/deepgram";
+import { createCalmUtterance } from "@/lib/browser-voice";
+import type { PaceId } from "@/components/start/start-data";
 
-/** The one Atlas voice. Samples live at `/voices/skylar-{pace}.mp3`. */
-export const ATLAS_VOICE_ID: DeepgramVoiceId = "skylar";
+/** The pace-sample sentence of the preview step (name-free). */
+const SAMPLE_TRANSCRIPT =
+  "Hi, I'm Atlas. This is how I sound. Clear and simple.";
 
-function sampleSource(pace: DeepgramPace) {
-  return `/voices/${ATLAS_VOICE_ID}-${pace}.mp3`;
+/** The personalized preview sentence the final step speaks. */
+export function previewTranscript(name: string) {
+  return `Hi ${name}, I'm Atlas. This is how I sound. Clear and simple.`;
 }
 
+/**
+ * Browser-voice previews for the onboarding tone.
+ *
+ * The wizard's pace samples and the final personalized preview both speak
+ * with the same engine (and calm tuning) the dashboard replies use, so the
+ * user hears exactly the voice they are choosing. One token guard keeps late
+ * utterances from overlapping when the user moves fast.
+ */
 export function useVoicePreview() {
   const [speakingId, setSpeakingId] = useState<string | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const objectUrlRef = useRef<string | null>(null);
-
-  const releaseObjectUrl = useCallback(() => {
-    if (objectUrlRef.current) {
-      URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = null;
-    }
-  }, []);
+  /** Bumps every stop/new start so stale `onend` events cannot clear a live one. */
+  const tokenRef = useRef(0);
 
   const stop = useCallback(() => {
-    const audio = audioRef.current;
+    tokenRef.current += 1;
 
-    if (audio) {
-      audio.pause();
-      audio.currentTime = 0;
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
     }
 
-    audioRef.current = null;
-    releaseObjectUrl();
     setSpeakingId(null);
-  }, [releaseObjectUrl]);
+  }, []);
 
-  const startAudio = useCallback(
-    (src: string, requestId: string | null, isObjectUrl = false) => {
-      const previous = audioRef.current;
+  /**
+   * Speak one preview line. `requestId` tags which control is speaking, so
+   * the UI can highlight it and stop() targets it.
+   */
+  const start = useCallback(
+    (text: string, requestId: string, pace: PaceId) => {
+      if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
 
-      if (previous) {
-        previous.pause();
-        previous.currentTime = 0;
-      }
+      const utterance = createCalmUtterance(text, pace);
 
-      releaseObjectUrl();
+      if (!utterance) return;
 
-      if (isObjectUrl) {
-        objectUrlRef.current = src;
-      }
+      tokenRef.current += 1;
+      const token = tokenRef.current;
 
-      const audio = new Audio(src);
-      audio.preload = "auto";
-
-      const finish = () => {
-        setSpeakingId((current) => (current === requestId ? null : current));
-
-        if (audioRef.current === audio) {
-          audioRef.current = null;
-        }
-
-        releaseObjectUrl();
+      utterance.onend = () => {
+        if (tokenRef.current === token) setSpeakingId(null);
+      };
+      utterance.onerror = () => {
+        if (tokenRef.current === token) setSpeakingId(null);
       };
 
-      audio.onended = finish;
-      audio.onerror = finish;
-      audioRef.current = audio;
       setSpeakingId(requestId);
-
-      void audio.play().catch(() => {
-        finish();
-      });
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(utterance);
     },
-    [releaseObjectUrl],
+    [],
   );
 
+  /** One pace sample: what Atlas sounds like at this speed. */
   const play = useCallback(
-    (pace: DeepgramPace = "steady", requestId: string | null = pace) => {
-      if (!(ATLAS_VOICE_ID in DEEPGRAM_VOICES)) return;
+    (pace: PaceId = "steady", requestId: string | null = pace) => {
+      if (!requestId) return;
 
-      startAudio(sampleSource(pace), requestId);
+      start(SAMPLE_TRANSCRIPT, requestId, pace);
     },
-    [startAudio],
+    [start],
   );
 
-  const playBlob = useCallback(
-    (blob: Blob, requestId: string | null = "final") => {
-      const url = URL.createObjectURL(blob);
-
-      startAudio(url, requestId, true);
+  /** The final personalized preview with the user's own name. */
+  const playName = useCallback(
+    (name: string, pace: PaceId, requestId = "final") => {
+      start(previewTranscript(name), requestId, pace);
     },
-    [startAudio],
+    [start],
   );
 
   useEffect(() => {
     return () => {
-      audioRef.current?.pause();
-      audioRef.current = null;
-      releaseObjectUrl();
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
     };
-  }, [releaseObjectUrl]);
+  }, []);
 
   return {
-    supported: typeof window !== "undefined" && "Audio" in window,
+    supported: typeof window !== "undefined" && "speechSynthesis" in window,
     speakingId,
     play,
-    playBlob,
+    playName,
     stop,
   };
 }

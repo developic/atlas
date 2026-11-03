@@ -15,7 +15,6 @@ import {
   type Disability,
   type PaceId,
 } from "@/components/start/start-data";
-import { DEEPGRAM_VOICES, type DeepgramVoiceId } from "@/lib/deepgram";
 import { dbGetPref, dbSetPref } from "@/lib/db/prefs";
 
 const ONBOARDING_PREF_KEY = "onboarding";
@@ -28,14 +27,12 @@ const DEFAULT_PACE: PaceId = "steady";
 export type Onboarding = {
   name: string;
   ageRange: AgeRange | null;
-  voiceId: DeepgramVoiceId | null;
   pace: PaceId;
   disability: Disability | null;
 };
 const AGE_VALUES = AGE_RANGES.map((range) => range.value);
 const PACE_IDS = PACES.map((pace) => pace.id);
 const DISABILITY_VALUES = DISABILITIES.map((item) => item.value);
-const VOICE_IDS = Object.keys(DEEPGRAM_VOICES) as DeepgramVoiceId[];
 
 function isOneOf<T extends string>(
   values: readonly T[],
@@ -64,7 +61,6 @@ function parseOnboarding(value: unknown): Onboarding | null {
   return {
     name: cleanName(record.name),
     ageRange: isOneOf(AGE_VALUES, record.ageRange) ? record.ageRange : null,
-    voiceId: isOneOf(VOICE_IDS, record.voiceId) ? record.voiceId : null,
     pace: isOneOf(PACE_IDS, record.pace) ? record.pace : DEFAULT_PACE,
     disability,
   };
@@ -90,7 +86,7 @@ export async function loadOnboarding(): Promise<Onboarding | null> {
 
 /**
  * The slice of onboarding the model should remember: who it is talking to.
- * Voice and pace stay client-side; they change how Atlas sounds, not what it
+ * The pace stays client-side; it changes how Atlas sounds, not what it
  * knows. Returns undefined when there is no name to remember.
  */
 export type UserProfile = {

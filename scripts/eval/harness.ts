@@ -2,16 +2,17 @@
  * Atlas agent evaluation harness.
  *
  * Runs scenario conversations through the REAL server turn pipeline
- * (src/lib/model.ts requestTurn loop: native tool calls, real Baseten model,
- * real Exa search/fetch tools, real speech-integrity gate) while keeping the
- * system prompt swappable via HARNESS_APP. Use it to validate prompt changes
- * on `bun run eval:live` (keys come from .env, nothing secrets printed):
+ * (src/lib/model.ts requestTurn loop: native tool calls, the real Meta Model
+ * API muse-spark models, real Exa search/fetch tools, real speech-integrity
+ * gate) while keeping the system prompt swappable via HARNESS_APP. Use it to
+ * validate prompt changes on `bun run eval:live` (keys come from .env,
+ * nothing secrets printed):
  *
  *   HARNESS_APP=/path/to/comparison/tree bun scripts/eval/runner.ts v2 heldout
  *
  * Cost note: every scenario is a live model turn (plus Exa calls where the
  * scenario needs them). Use scripts/prompt-eval.mjs for the cheap 12-probe
- * smoke and scripts/omni-probe.mjs for endpoint health.
+ * smoke and scripts/model-probe.mjs for endpoint health.
  */
 /**
  * The app tree under test. Defaults to this repository (production code);

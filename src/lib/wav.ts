@@ -1,7 +1,7 @@
 /**
  * Small WAV helpers shared by the dashboard and its tests.
  *
- * The omni model documents wav and mp3 input only, while MediaRecorder usually
+ * The model documents WAV and MP3 audio input only, while MediaRecorder usually
  * produces WebM/Opus. The dashboard decodes the browser clip and re-encodes it
  * as 16 kHz mono PCM16 before sending, which also matches Parakeet's native
  * input rate and keeps the upload small.

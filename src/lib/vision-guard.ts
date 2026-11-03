@@ -34,9 +34,9 @@ export type GuardResult = {
 const URGENCIES: readonly GuardUrgency[] = ["none", "caution", "stop"];
 
 /**
- * Strict output contract. The gateway coerces prose into this shape (the same
- * mechanism used by the signing path), so the warning is a typed field rather
- * than a paragraph the route has to interpret.
+ * Strict output contract. The endpoint coerces prose into this shape (the
+ * same `text.format` mechanism used by the signing path), so the warning is
+ * a typed field rather than a paragraph the route has to interpret.
  */
 const GUARD_FORMAT = {
   type: "json_schema",

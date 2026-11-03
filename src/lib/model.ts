@@ -1,8 +1,9 @@
 /**
  * Server-only model helpers for the orb — native tool-calling only.
  *
- * One turn is a small agent loop: send the recording/typed message to Baseten
- * with the Atlas system prompt, and let the model act through native
+ * One turn is a small agent loop: send the recording/typed message to Meta
+ * Model API (muse-spark, OpenAI-compatible Chat Completions) with the Atlas
+ * system prompt, and let the model act through native
  * `tool_calls` (websearch, webfetch, get_current_time, create, start_new_chat,
  * open_camera, shutdown, reminder, speak). Each
  * round either runs tool calls and continues the loop, or ends the turn with
@@ -28,6 +29,7 @@ import { capabilitiesFor, isToolAllowed, toolsForMode } from "./access-modes";
 import type { UserProfile } from "./onboarding";
 import { describeCardOverflow, joinCardMarkdown, MAX_CARDS, type CardContent } from "./cards";
 import type { ChatMessage } from "./chat-message";
+import { metaClient, MetaModelError } from "./meta-client";
 import { MAX_TRANSCRIPT_CHARS, normalizeSpeech } from "./orb-turn";
 import { OrbError } from "./orb-errors";
 import {
@@ -57,13 +59,20 @@ import {
   validateSpeechClaim,
 } from "./speech-integrity";
 import type { TurnDebug, TurnDebugRound } from "./turn-debug";
+import type OpenAI from "openai";
+import { APIError } from "openai";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const BASETEN_MODEL = "meta-models/muse-spark-open-1026";
-const BASETEN_URL = "https://inference.baseten.co/v1/chat/completions";
+/**
+ * Muse Spark models on Meta Model API (https://dev.meta.ai/docs/models).
+ * Text and image turns run `muse-spark-1.3`; a turn that carries audio runs
+ * `muse-spark-1.2` — audio understanding on 1.3 is documented as degraded.
+ */
+export const META_TEXT_MODEL = "muse-spark-1.3";
+const META_AUDIO_MODEL = "muse-spark-1.2";
 /**
  * 1_200 truncated six-card `create` calls (finish_reason "length"). 3_000
  * stays far below the validator caps (6 × 4k chars of card content) while
@@ -209,11 +218,12 @@ type Usage = {
   };
 };
 
-type NativeToolCall = {
-  id: string;
-  type: "function";
-  function: { name: string; arguments: string };
-};
+/**
+ * One wire message and one tool call for Meta Model API Chat Completions.
+ * The types come from the OpenAI SDK (Model API's documented client), so the
+ * request shape is checked at compile time at both ends.
+ */
+type NativeToolCall = OpenAI.Chat.Completions.ChatCompletionMessageToolCall;
 
 type ContentPart =
   | { type: "text"; text: string }
@@ -226,12 +236,7 @@ type ContentPart =
       image_url: { url: string };
     };
 
-type Message = {
-  role: "system" | "user" | "assistant" | "tool";
-  content: string | ContentPart[];
-  tool_calls?: NativeToolCall[];
-  tool_call_id?: string;
-};
+type Message = OpenAI.Chat.Completions.ChatCompletionMessageParam;
 
 type ModelResult = {
   content: string;
@@ -311,7 +316,8 @@ async function requestTurn(
   callbacks: TurnCallbacks,
   context: TurnContext,
 ): Promise<OmniTurn> {
-  const apiKey = getApiKey();
+  const client = getMetaClient();
+  const model = modelFor(content);
   const userContent: ContentPart[] = [...content];
   const frames = parseSignFrames(context.mediaFrames ?? []);
 
@@ -411,7 +417,7 @@ async function requestTurn(
 
     const seen = reporterFor(callbacks);
 
-    result = await runModelTurn(apiKey, messages, seen, run, tools);
+    result = await runModelTurn(client, model, messages, seen, run, tools);
     const calls = restrictCalls(parseNativeToolCalls(result.nativeToolCalls), mode);
 
     if (calls.length === 0) {
@@ -880,7 +886,7 @@ function finalize(
 
 function metaFrom(result: ModelResult, toolRounds: number): TurnMeta {
   return {
-    model: result.model || BASETEN_MODEL,
+    model: result.model || META_TEXT_MODEL,
     finishReason: result.finishReason || "stop",
     promptTokens: result.usage.prompt_tokens ?? 0,
     cachedTokens: result.usage.prompt_tokens_details?.cached_tokens ?? 0,
@@ -895,88 +901,154 @@ function metaFrom(result: ModelResult, toolRounds: number): TurnMeta {
 // Model calls
 // ---------------------------------------------------------------------------
 
-function getApiKey(): string {
-  const key = process.env.BASETEN_API_KEY?.trim();
+function getMetaClient(): OpenAI {
+  try {
+    return metaClient();
+  } catch (error) {
+    if (error instanceof MetaModelError) {
+      throw new OrbError("config", error.message);
+    }
 
-  if (!key) {
-    throw new OrbError("config", "BASETEN_API_KEY is not configured. Add it to .env.");
+    throw error;
+  }
+}
+
+/** `META_AUDIO_MODEL` when the turn carries audio; `META_TEXT_MODEL` otherwise. */
+function modelFor(content: readonly ContentPart[]): string {
+  return content.some((part) => part.type === "input_audio")
+    ? META_AUDIO_MODEL
+    : META_TEXT_MODEL;
+}
+
+/**
+ * Map one SDK failure to the app's typed codes, against Meta Model API's
+ * documented statuses (https://dev.meta.ai/docs/error-handling): 429 and 5xx
+ * are retryable; 504 is the non-streaming gateway limit; 401/402/403 and
+ * request-level 4xx refuse the key or the request.
+ */
+function mapModelError(error: unknown): OrbError {
+  if (error instanceof OrbError) return error;
+
+  if (error instanceof APIError) {
+    const status = error.status ?? 0;
+    const detail = error.message.trim().slice(0, 180);
+
+    if (status === 429 || status === 500 || status === 503) {
+      return new OrbError("busy", `Muse Spark is busy (${status}). Try again in a moment.`);
+    }
+
+    if (status === 504) {
+      return new OrbError("timeout", "The assistant took too long to think. Try again.");
+    }
+
+    if (status === 401 || status === 403) {
+      return new OrbError(
+        "config",
+        `Muse Spark rejected the API key (${status}). Check MODEL_API_KEY.`,
+      );
+    }
+
+    if (status === 402) {
+      return new OrbError(
+        "config",
+        "Model API rejected the request for billing reasons (402). Check the account balance.",
+      );
+    }
+
+    return new OrbError(
+      "config",
+      `Muse Spark failed (${status || "request"}): ${detail || "unknown error"}`,
+    );
   }
 
-  return key;
+  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+    return new OrbError("timeout", "The assistant took too long to think. Try again.");
+  }
+
+  return new OrbError("config", "The assistant is unavailable.");
 }
 
 async function runModelTurn(
-  apiKey: string,
+  client: OpenAI,
+  model: string,
   messages: Message[],
   callbacks: TurnCallbacks,
   run: TurnRun,
   tools: readonly OrbTool[],
 ): Promise<ModelResult> {
-  let result = await callModel(apiKey, messages, run, { tools });
+  let result = await callModel(client, model, messages, run, { tools });
 
   if (result.finishReason === "length") {
-    result = await callModel(
-      apiKey,
-      [
-        ...messages,
-        { role: "assistant", content: result.content },
-        {
-          role: "user",
-          content:
-            "Your previous reply was cut off mid-call. Redo that call so it completes in one piece: leaner card content, or fewer cards this round, keeping the substance. If only the words remain, finish with the speak tool.",
-        },
-      ],
-      run,
-      { tools },
-    );
+    const retry: Message[] = [
+      ...messages,
+      { role: "assistant", content: result.content },
+      {
+        role: "user",
+        content:
+          "Your previous reply was cut off mid-call. Redo that call so it completes in one piece: leaner card content, or fewer cards this round, keeping the substance. If only the words remain, finish with the speak tool.",
+      },
+    ];
+
+    result = await callModel(client, model, retry, run, { tools });
   }
 
   if (!result.content.trim() && result.nativeToolCalls.length === 0) {
-    throw new OrbError("no_reply", "The Muse Spark Open model returned no text.");
+    throw new OrbError("no_reply", "Muse Spark returned no text.");
   }
 
   return result;
 }
 
 async function callModel(
-  apiKey: string,
+  client: OpenAI,
+  model: string,
   messages: Message[],
   run: TurnRun,
   options: { tools?: readonly OrbTool[] } = {},
 ): Promise<ModelResult> {
   const startedAt = performance.now();
-  const response = await postModel(
-    apiKey,
-    {
-      model: BASETEN_MODEL,
-      messages,
-      max_tokens: DEFAULT_MAX_REPLY_TOKENS,
-      temperature: 0.1,
-      reasoning_effort: REASONING_EFFORT,
-      ...(options.tools && options.tools.length > 0
-        ? {
-            tools: options.tools,
-            tool_choice: "auto",
-            parallel_tool_calls: true,
-          }
-        : {}),
-    },
-    run,
-  );
-  const payload = (await response.json()) as {
-    model?: string;
-    choices?: Array<{
-      message?: {
-        content?: string | null;
-        reasoning_content?: string | null;
-        tool_calls?: NativeToolCall[] | null;
-      };
-      finish_reason?: string | null;
-    }>;
-    usage?: Usage;
-  };
-  const choice = payload.choices?.[0];
+  let completion: OpenAI.Chat.Completions.ChatCompletion;
+
+  try {
+    completion = await client.chat.completions.create(
+      {
+        model,
+        messages,
+        max_completion_tokens: DEFAULT_MAX_REPLY_TOKENS,
+        /**
+         * Bounded determinism for a tool loop; the documented tuned default is
+         * 1.0, but the prompt was validated at 0.1 and the loop prefers stable
+         * tool calls. Both 0.1 and 1.0 are inside the documented 0–2 range.
+         */
+        temperature: 0.1,
+        reasoning_effort: REASONING_EFFORT,
+        /**
+         * Groups one conversation's turns so the shared prompt prefix stays
+         * cacheable (the cache-affinity role of the retired session header).
+         */
+        ...(run.session ? { prompt_cache_key: run.session } : {}),
+        ...(options.tools && options.tools.length > 0
+          ? {
+              tools: [...options.tools],
+              tool_choice: "auto",
+              parallel_tool_calls: true,
+            }
+          : {}),
+      },
+      {
+        signal: AbortSignal.any([run.signal, AbortSignal.timeout(MODEL_TIMEOUT_MS)]),
+      },
+    );
+  } catch (error) {
+    throw mapModelError(error);
+  }
+
+  const choice = completion.choices[0];
   const message = choice?.message;
+  // `reasoning_content` is a Model API chat-completions extension the OpenAI
+  // SDK type does not carry; it is redacted to empty for external keys.
+  const reasoning = (message as { reasoning_content?: unknown } | undefined)
+    ?.reasoning_content;
 
   // Keep the exact parsed payload, not a reconstruction: the panel exists to
   // show what the model actually returned, including reasoning and tool calls.
@@ -986,59 +1058,16 @@ async function callModel(
       atMs: Math.round(performance.now() - run.debug.startedAt),
       ms: Math.round(performance.now() - startedAt),
       tools: (options.tools?.length ?? 0) > 0,
-      response: payload,
+      response: completion,
     });
   }
 
   return {
     content: typeof message?.content === "string" ? message.content : "",
-    reasoning: typeof message?.reasoning_content === "string" ? message.reasoning_content : "",
+    reasoning: typeof reasoning === "string" ? reasoning : "",
     finishReason: choice?.finish_reason ?? "stop",
-    usage: payload.usage ?? {},
-    model: payload.model ?? BASETEN_MODEL,
+    usage: completion.usage ?? {},
+    model: completion.model ?? model,
     nativeToolCalls: Array.isArray(message?.tool_calls) ? message.tool_calls : [],
   };
-}
-
-async function postModel(
-  apiKey: string,
-  body: Record<string, unknown>,
-  run: TurnRun,
-): Promise<Response> {
-  let response: Response;
-
-  try {
-    response = await fetch(BASETEN_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        ...(run.session ? { "x-session-affinity": run.session } : {}),
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.any([run.signal, AbortSignal.timeout(MODEL_TIMEOUT_MS)]),
-    });
-  } catch (error) {
-    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
-      throw new OrbError("timeout", "The assistant took too long to think. Try again.");
-    }
-
-    throw new OrbError("config", "The assistant is unavailable.");
-  }
-
-  if (response.status === 401 || response.status === 403) {
-    throw new OrbError("config", `Muse Spark Open rejected the API key (${response.status}).`);
-  }
-  if (response.status === 402) {
-    throw new OrbError("config", "Baseten rejected the request for billing reasons (402). Check the workspace plan.");
-  }
-  if (response.status === 429 || response.status === 503 || response.status === 529) {
-    throw new OrbError("busy", `Muse Spark Open is busy (${response.status}). Try again in a moment.`);
-  }
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new OrbError("config", `Muse Spark Open failed (${response.status}): ${detail.slice(0, 200)}`);
-  }
-
-  return response;
 }

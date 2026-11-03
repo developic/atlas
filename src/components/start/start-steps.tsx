@@ -1,6 +1,6 @@
 import type { FormEvent, ReactNode, RefObject } from "react";
 import Link from "next/link";
-import { Check, Loader2, Square, Volume2 } from "lucide-react";
+import { Check, Square, Volume2 } from "lucide-react";
 
 import {
  AGE_RANGES,
@@ -353,7 +353,6 @@ type DoneStepProps = BaseStepProps & {
  selectedPace: Pace;
  speakingId: string | null;
  supported: boolean;
- finalPreviewState: "idle" | "loading" | "error";
  onFinalPreview: () => void;
  onEdit: (step: Step) => void;
 };
@@ -366,7 +365,6 @@ export function DoneStep({
  selectedPace,
  speakingId,
  supported,
- finalPreviewState,
  onFinalPreview,
  onEdit,
  onBack,
@@ -387,32 +385,16 @@ export function DoneStep({
  type="button"
  variant="secondary"
  onClick={onFinalPreview}
- disabled={!supported || finalPreviewState === "loading"}
+ disabled={!supported}
  className="mt-4 h-12 w-full rounded-full text-sm font-semibold"
  >
- {finalPreviewState === "loading" ? (
- <Loader2 className="size-4 motion-safe:animate-spin" />
- ) : speakingId === "final" ? (
+ {speakingId === "final" ? (
  <Square className="size-4" />
  ) : (
  <Volume2 className="size-4" />
  )}
- {finalPreviewState === "loading"
- ? "Making your preview…"
- : speakingId === "final"
- ? "Stop sample"
- : "Hear me say hi"}
+ {speakingId === "final" ? "Stop sample" : "Hear me say hi"}
  </Button>
-
- {finalPreviewState === "error" ? (
- <p
- aria-live="polite"
- className="mt-2 font-mono text-xs leading-relaxed text-ink-muted"
- >
- Couldn’t make a personalized preview. Playing a standard sample
- instead.
- </p>
- ) : null}
 
  {!supported ? (
  <p className="mt-2 font-mono text-xs leading-relaxed text-ink-muted">

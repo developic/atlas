@@ -34,6 +34,7 @@ import {
   type AccessMode,
 } from "@/lib/access-modes";
 import { SidebarPanel } from "@/components/dashboard/sidebar-panel";
+import { Volume2 } from "lucide-react";
 import { cardKind } from "@/lib/cards";
 import type { ChatMessage } from "@/lib/chat-message";
 import {
@@ -47,6 +48,15 @@ import {
   dbSaveThread,
   dbSetActiveThread,
 } from "@/lib/db/threads";
+import {
+  dbDeleteMoods,
+  dbListMoods,
+  dbPutMood,
+} from "@/lib/db/moods";
+import {
+  buildSampleMoods,
+  isSampleMoodEntry,
+} from "@/lib/sample-moods";
 import { toolTraceLabel } from "@/lib/tool-trace";
 import { useLayoutContext } from "@/lib/layout/use-layout-context";
 import { ParticlesOrb } from "@/registry/orbe/particles-orb/particles-orb";
@@ -283,6 +293,60 @@ export function DashboardFlow() {
       mode: accessMode,
     });
   }, [accessMode]);
+
+  /**
+   * Sample mood data for hackathon judging and onboarding: an empty log in
+   * autism mode seeds the clearly-labeled demo set automatically, so nobody
+   * must log two weeks of moods to see the trend and report flow. Only
+   * `sample-mood-*` ids are ever written or removed; the real log is never
+   * touched. Clearing dismisses the samples for the rest of the session, so
+   * the auto-seed never fights the user's choice.
+   */
+  const [sampleMoodsLoaded, setSampleMoodsLoaded] = useState(false);
+  const sampleAutoSeededRef = useRef(false);
+
+  const refreshSampleMoods = useCallback(() => {
+    if (accessMode !== "autism") {
+      setSampleMoodsLoaded(false);
+      return;
+    }
+
+    void dbListMoods().then((all) => {
+      setSampleMoodsLoaded(all.some(isSampleMoodEntry));
+    });
+  }, [accessMode]);
+
+  useEffect(() => {
+    refreshSampleMoods();
+  }, [refreshSampleMoods]);
+
+  useEffect(() => {
+    if (accessMode !== "autism" || sampleAutoSeededRef.current) return;
+    sampleAutoSeededRef.current = true;
+
+    void dbListMoods().then((all) => {
+      if (all.length > 0) {
+        setSampleMoodsLoaded(all.some(isSampleMoodEntry));
+        return;
+      }
+
+      const seeded = buildSampleMoods(Date.now());
+      void Promise.all(seeded.map((entry) => dbPutMood(entry))).then(() =>
+        refreshSampleMoods(),
+      );
+    });
+  }, [accessMode, refreshSampleMoods]);
+
+  const clearSampleMoods = useCallback(() => {
+    void dbListMoods().then((all) => {
+      const ids = all.filter(isSampleMoodEntry).map((entry) => entry.id);
+      if (ids.length === 0) {
+        setSampleMoodsLoaded(false);
+        return;
+      }
+      void dbDeleteMoods(ids).then(() => refreshSampleMoods());
+    });
+  }, [refreshSampleMoods]);
 
   /** The `+` button: a blank thread, stopping any turn in flight. */
   const startThread = useCallback(() => {
@@ -884,6 +948,15 @@ export function DashboardFlow() {
     { label: mainLabel, run: handleMain, active: live },
     { label: signCameraLabel, run: toggleCamera, active: signStatus === "live" },
     { label: "New chat", run: startThread, active: false },
+    ...(accessMode === "autism" && sampleMoodsLoaded
+      ? [
+          {
+            label: "Clear sample moods (demo)",
+            run: clearSampleMoods,
+            active: true,
+          },
+        ]
+      : []),
     {
       label: sidebarOpen ? "Hide chats" : "Show chats",
       run: () => setSidebarOpen((current) => !current),
@@ -1027,8 +1100,6 @@ export function DashboardFlow() {
         <AccessBar
           mode={accessMode}
           onChange={handleAccessChange}
-          voiceReplies={voiceReplies}
-          onVoiceRepliesChange={setVoiceReplies}
           className="mb-4"
         />
         {/* Camera + Sign controls sit above the orb: the pointer path down to
@@ -1093,6 +1164,18 @@ export function DashboardFlow() {
             ? `Threads (${threads.length})`
             : "Threads"}
         </button>
+        {accessMode === "mute" ? (
+          <button
+            type="button"
+            onClick={() => setVoiceReplies((current) => !current)}
+            aria-pressed={voiceReplies}
+            aria-label={voiceReplies ? "Turn voice replies off" : "Turn voice replies on"}
+            className={`absolute top-[max(1rem,env(safe-area-inset-top))] left-[max(1rem,env(safe-area-inset-left))] z-40 inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 font-mono text-[11px] backdrop-blur transition-colors ${voiceReplies ? "border-sage bg-paper/90 text-ink" : "border-line/70 bg-paper/70 text-ink-muted hover:border-sage hover:text-ink"}`}
+          >
+            <Volume2 aria-hidden="true" className="size-3.5" strokeWidth={2} />
+            Voice replies {voiceReplies ? "on" : "off"}
+          </button>
+        ) : null}
         {showCards ? (
           <div className="w-full">
             {wide ? (

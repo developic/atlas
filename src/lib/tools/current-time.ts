@@ -4,7 +4,6 @@ export const currentTimeTool: OrbTool = {
   type: "function",
   function: {
     name: "get_current_time",
-    strict: true,
     description:
       "Get the current date and time for an IANA timezone such as Asia/Tokyo or Europe/London. Use it when the answer depends on the current time or date, or when the user asks what day or time it is. Returns a formatted local time plus the UTC instant. It does not return weather, news, or anything other than the clock.",
     parameters: {

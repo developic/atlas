@@ -8,9 +8,10 @@ import {
 /**
  * Signing-video test endpoint: full mp4 in, transcription out.
  *
- * The Baseten turn pipeline has no video input, so this route exists to test
- * whole clips against Muse Spark directly. The key stays server-side;
- * the client only ever sees the transcript, token counts, and timing.
+ * The chat turn pipeline sends text, images, and audio — not video — so this
+ * route exists to test whole clips against Muse Spark directly. The key stays
+ * server-side; the client only ever sees the transcript, token counts, and
+ * timing.
  */
 export async function POST(request: Request) {
   try {

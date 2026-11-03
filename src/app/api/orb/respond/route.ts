@@ -1,19 +1,8 @@
 import {
-  DEEPGRAM_STREAM_SAMPLE_RATE,
-  isDeepgramPace,
-  isDeepgramVoiceId,
-  type DeepgramPace,
-  type DeepgramVoiceId,
-} from "@/lib/deepgram";
-import {
   capabilitiesFor,
   isAccessMode,
-  isSpeechEnabled,
   type AccessMode,
 } from "@/lib/access-modes";
-import {
-  synthesizeSpeechStream,
-} from "@/lib/deepgram-server";
 import { parseHistory, type ChatMessage } from "@/lib/chat-message";
 import { parseProfile, type UserProfile } from "@/lib/onboarding";
 import {
@@ -24,13 +13,12 @@ import {
 } from "@/lib/model";
 import { parseSignFrames } from "@/lib/media-frames";
 import { isOrbError, OrbError, userMessageFor } from "@/lib/orb-errors";
-import { MAX_TRANSCRIPT_CHARS, normalizeSpeech } from "@/lib/orb-turn";
+import { MAX_TRANSCRIPT_CHARS } from "@/lib/orb-turn";
 import {
   parseReminderSnapshot,
   type ReminderSnapshotItem,
 } from "@/lib/reminders";
 import { parseMoodSnapshot, type MoodSnapshotItem } from "@/lib/moods";
-import { createSentenceChunker } from "@/lib/sentence-chunker";
 import type { TurnEvent } from "@/lib/turn-stream";
 
 const MAX_AUDIO_BYTES = 12 * 1024 * 1024;
@@ -42,8 +30,6 @@ type TurnInput = {
   /** Stills from the conversation's most recent media, for one turn only. */
   mediaFrames: string[];
   history: ChatMessage[];
-  voice?: DeepgramVoiceId;
-  pace?: DeepgramPace;
   /** Who Atlas is talking to, from `/start`; remembered via the prompt. */
   profile?: UserProfile;
   /** Pending reminders from the client's store (capped, validated). */
@@ -54,7 +40,7 @@ type TurnInput = {
   cameraOn: boolean;
   /** IANA time zone for wall-clock phrases ("tomorrow at 9am"). */
   timeZone?: string;
-  /** Stable per-conversation id; routes turns to one replica for prompt caching. */
+  /** Stable per-conversation id; groups the turns for prompt caching via `prompt_cache_key`. */
   session?: string;
   /** Selected accessibility mode; null keeps the existing behaviour. */
   mode: AccessMode | null;
@@ -72,10 +58,9 @@ type TurnInput = {
  *   {"status":"transcript","transcript":"…"}
  *   {"status":"tool","tool":"…","detail":"…"}  // websearch, webfetch, …
  *   {"status":"speak-delta","text":"…"}    // only after the turn passed integrity validation
- *   {"status":"audio","pcm":"…","sampleRate":24000,"seq":0}
  *   {"status":"speaking","transcript":"…","speak":"…","cards":[…],"sources":[…]}
- *   {"status":"audio-done"}                 // always; the client falls back
- *                                          // to the browser voice when no PCM arrived
+ *   {"status":"audio-done"}                 // always; the client speaks the
+ *                                          // reply with the browser voice
  *   {"status":"error","code":"…","message":"…"} on failure
  *
  * Earlier turns arrive as text (`history`), never audio: the client keeps the
@@ -125,60 +110,9 @@ export async function POST(request: Request) {
           send({ status: "transcript", transcript: input.transcript });
         }
 
-        const preferences = {
-          voice: input.voice,
-          pace: input.pace,
-        };
-        // Delivery is an application decision: deaf mode never reaches TTS,
-        // and mute mode only when the user enabled voice replies.
-        const speechEnabled = isSpeechEnabled(input.mode, input.voiceReplies);
-        const chunker = createSentenceChunker();
-        let audioChain = Promise.resolve();
-        let sequence = 0;
-        let pcmSent = false;
-        let ttsFailure: unknown = null;
-
-        const queueSentence = (sentence: string) => {
-          const text = normalizeSpeech(sentence);
-
-          if (!text || !speechEnabled) return;
-
-          audioChain = audioChain.then(async () => {
-            if (ttsFailure || clientSignal.aborted) return;
-
-            try {
-              for await (const pcm of synthesizeSpeechStream(
-                text,
-                preferences,
-              )) {
-                if (pcm.byteLength === 0) continue;
-
-                pcmSent = true;
-                send({
-                  status: "audio",
-                  pcm: Buffer.from(pcm).toString("base64"),
-                  sampleRate: DEEPGRAM_STREAM_SAMPLE_RATE,
-                  seq: sequence,
-                });
-                sequence += 1;
-              }
-            } catch (error) {
-              // Stop queueing further sentences: the client falls back to the
-              // browser voice on audio-done, so more failed requests only add
-              // latency. Logged here because the fallback hides the cause.
-              ttsFailure = error;
-              console.error(
-                JSON.stringify({
-                  event: "orb-turn-tts",
-                  turnId,
-                  stage: "pcm-stream",
-                  message: error instanceof Error ? error.message : String(error),
-                }),
-              );
-            }
-          });
-        };
-
+        // Delivery is the browser's own voice: the client speaks the reply
+        // once the turn text closes, so the route streams the approved
+        // segments and lets the dashboard schedule the speech.
         const callbacks = {
           onTool: (tool: string, detail?: string) => {
             send({
@@ -192,17 +126,13 @@ export async function POST(request: Request) {
           },
           onSpeakDelta: (delta: string) => {
             // Fires only at finalization: the model loop emits deltas after
-            // every segment passed the integrity gate, so TTS receives
+            // every segment passed the integrity gate, so the voice receives
             // exactly the approved speech.
             send({ status: "speak-delta", text: delta });
-
-            for (const sentence of chunker.push(delta)) {
-              queueSentence(sentence);
-            }
           },
         };
 
-        stage = "omni";
+        stage = "model";
         const debug = input.debug && turnDebugEnabled();
         const media =
           input.mediaFrames.length > 0
@@ -241,19 +171,13 @@ export async function POST(request: Request) {
           ...(turn.debug ? { debug: turn.debug } : {}),
         };
 
-        // Send the full text before TTS finishes. The client holds the first
-        // audio chunks and reveals this text when playback is ready, so the
-        // caption, transcript panel, and voice start together.
+        // Send the full text before the voice speaks it. The client reveals
+        // this text when the voice is ready to start, so the caption,
+        // transcript panel, and voice start together.
         send(final);
 
-        for (const sentence of chunker.flush()) {
-          queueSentence(sentence);
-        }
-
-        await audioChain;
-
-        // Always close the audio sequence. When no PCM arrived the client
-        // speaks the reply with the browser voice instead of an MP3 download.
+        // Always close the audio sequence. There is no server PCM now: this
+        // is the client's cue to speak the reply with the browser voice.
         if (!clientSignal.aborted) {
           send({ status: "audio-done" });
         }
@@ -272,7 +196,7 @@ export async function POST(request: Request) {
             completionTokens: turn.meta.completionTokens,
             reasoningTokens: turn.meta.reasoningTokens,
             toolRounds: turn.meta.toolRounds,
-            audio: speechEnabled ? (pcmSent ? "pcm" : "browser") : "off",
+            audio: "browser",
           }),
         );
       } catch (error) {
@@ -339,8 +263,6 @@ async function readRequest(request: Request): Promise<TurnInput> {
       transcript?: unknown;
       mediaFrames?: unknown;
       history?: unknown;
-      voice?: unknown;
-      pace?: unknown;
       profile?: unknown;
       reminders?: unknown;
       moods?: unknown;
@@ -361,8 +283,6 @@ async function readRequest(request: Request): Promise<TurnInput> {
           : "",
       mediaFrames: parseSignFrames(body.mediaFrames),
       history: parseHistory(body.history),
-      voice: isDeepgramVoiceId(body.voice) ? body.voice : undefined,
-      pace: isDeepgramPace(body.pace) ? body.pace : undefined,
       profile: parseProfile(body.profile),
       reminderSnapshot: parseReminderSnapshot(body.reminders),
       moodSnapshot: parseMoodSnapshot(body.moods),
@@ -378,8 +298,6 @@ async function readRequest(request: Request): Promise<TurnInput> {
   const form = await request.formData();
   const file = form.get("audio");
   const history = parseHistory(form.get("history"));
-  const voice = form.get("voice");
-  const pace = form.get("pace");
   const transcript = form.get("transcript");
   const mediaFrames = parseSignFrames(form.getAll("mediaFrame"));
   const session = readSession(form.get("session"));
@@ -391,10 +309,6 @@ async function readRequest(request: Request): Promise<TurnInput> {
   const timeZone = readTimeZone(form.get("timeZone"));
   const mode = readMode(form.get("mode"));
   const voiceReplies = form.get("voiceReplies") === "1";
-  const preferences = {
-    voice: isDeepgramVoiceId(voice) ? voice : undefined,
-    pace: isDeepgramPace(pace) ? pace : undefined,
-  };
 
   if (!(file instanceof File) || file.size === 0) {
     return {
@@ -415,7 +329,6 @@ async function readRequest(request: Request): Promise<TurnInput> {
       timeZone,
       mode,
       voiceReplies,
-      ...preferences,
     };
   }
 
@@ -438,7 +351,6 @@ async function readRequest(request: Request): Promise<TurnInput> {
     timeZone,
     mode,
     voiceReplies,
-    ...preferences,
   };
 }
 

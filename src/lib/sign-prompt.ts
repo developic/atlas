@@ -449,6 +449,11 @@ Recognize the following American Sign Language (ASL) signs from their visible ha
 
 - Distinguish individual letters from complete signs.
 - Combine consecutive fingerspelled letters into words.
+- Read fingerspelling as an ordered sequence of held handshapes: the word is the letters in order (H held, then I held, reads "hi"). A single fast clip can hold two letters back to back.
+- When the hand holds one handshape and then holds a different one, the transcription covers both in order — a single-letter answer is wrong for a two-hold clip.
+- The blurred hand between two holds is a transition, never a letter — never base the reading on a motion-blurred frame.
+- Answer with a number word only when a number handshape is clearly held steady (e.g. ONE as a steady extended index finger). A fingerspelled letter sequence is a word, never a number.
+- Tell I from ONE by which finger is up: I extends the little finger on the outer edge of the hand with the other fingers folded; ONE extends the index finger next to the thumb. When the extended finger is on the outer edge, it is I, not ONE.
 - Recognize names, places, and unfamiliar words without replacing them with guesses.
 - Pay attention to repeated letters, hand orientation, and transitions.
 - Recognize J and Z through their movement paths, not just static handshapes.`,
@@ -462,6 +467,7 @@ Recognize the following American Sign Language (ASL) signs from their visible ha
 - Do not confuse similar handshapes when their locations or movements differ.
 - Consider context without allowing it to override visible evidence.
 - Prefer your best, brief reading of ambiguous signing over marking the reply unreadable. Mark unreadable only when nothing at all is readable. Never invent signs that have no visible basis.
+- Enumerate each distinct handshape the signing hand holds during the clip, in order, before answering: the transcription must account for every held handshape, never a single frame.
 - Account for regional variations and differences in individual signing styles.
 - Do not assume that every English word has a direct one-to-one ASL sign.`,
 

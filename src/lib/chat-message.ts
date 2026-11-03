@@ -30,7 +30,7 @@ export type ModelHistoryMessage = Pick<ChatMessage, "role" | "content" | "speak"
 const DEFAULT_HISTORY_TOKENS = 100_000;
 
 /**
- * Hysteresis for the cache prefix. Baseten caches the token prefix, so a
+ * Hysteresis for the cache prefix. Model API caches the token prefix, so a
  * history window must stay byte-stable between sends to keep cache hits from
  * extending beyond the static system prompt. While the history fits the
  * budget it is passed through untouched. When it overflows, the window is

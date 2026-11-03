@@ -1,10 +1,10 @@
 /**
  * Server-only signing-video transcription via Muse Spark.
  *
- * Full video clips go to `muse-spark-1.3-contributor` through OpenCode's Go
- * Responses endpoint (the shared `muse-video` transport), which accepts an mp4
- * as an `input_video` part. Never import this module from a client component:
- * it reads OPENCODE_API_KEY.
+ * Full video clips go to `muse-spark-1.3` on Meta Model API's Responses
+ * endpoint (the shared `muse-video` transport), which accepts an mp4 as an
+ * `input_video` part. Never import this module from a client component:
+ * it reads MODEL_API_KEY.
  */
 
 import { DEFAULT_SIGN_PROMPT } from "./sign-prompt";
@@ -20,7 +20,8 @@ const SIGN_VIDEO_TIMEOUT_MS = 180_000;
 /** Upper bound for custom test-client prompts; the default prompt is shorter. */
 const SIGN_PROMPT_MAX_CHARS = 48_000;
 const MAX_VIDEO_BYTES = 15 * 1024 * 1024;
-const ALLOWED_TYPES = ["video/mp4", "video/webm", "video/quicktime"];
+/** The gateway's video input is MP4 only — anything else fails there with a confusing 502, so refuse it here with a readable 400. */
+const ALLOWED_TYPES = ["video/mp4"];
 
 export type SignTranscription = {
   transcript: string;
@@ -35,9 +36,9 @@ export type SignTranscription = {
 /**
  * Structured-output contract for the transcription turn.
  *
- * The gateway enforces this schema (probed live, Nov 2026: a bare-prose
- * prompt was coerced into the schema shape), so "which words are the
- * transcription" is a typed field — the route no longer has to recognize
+ * The endpoint enforces this schema (documented at dev.meta.ai/docs/
+ * structured-output: `text.format` constrains decoding), so "which words are
+ * the transcription" is a typed field — the route no longer has to recognize
  * a label phrasing inside free-form model output.
  */
 const TRANSCRIPTION_FORMAT = {
@@ -134,7 +135,7 @@ export function assertSignVideo(
   if (!ALLOWED_TYPES.includes(mime)) {
     throw new SignVideoError(
       400,
-      "Only mp4, webm, or mov video can be tested.",
+      "Only MP4 video can be tested — convert the clip and retry.",
     );
   }
 

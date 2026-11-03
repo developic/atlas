@@ -6,6 +6,7 @@ import type { Dispatch, SetStateAction } from "react";
 import { shouldRevealTurn, type RevealTrigger } from "@/components/dashboard/orb-reveal";
 import { usePcmPlayer } from "@/components/dashboard/use-pcm-player";
 import { joinCardMarkdown } from "@/lib/cards";
+import { createCalmUtterance } from "@/lib/browser-voice";
 import {
   toModelHistory,
   trimHistory,
@@ -13,6 +14,7 @@ import {
 } from "@/lib/chat-message";
 import { loadOnboarding, parseProfile } from "@/lib/onboarding";
 import type { AccessMode } from "@/lib/access-modes";
+import type { PaceId } from "@/components/start/start-data";
 import { getCookie, setCookie } from "@/lib/cookies";
 import {
   applyReminderDirectives,
@@ -41,7 +43,7 @@ export const MAX_SESSION_MESSAGES = 500;
 
 /** The model gets a token-budgeted slice of the session (~10% of its window). */
 const MAX_HISTORY_TOKENS = 100_000;
-/** The free omni worker is shared; retry a busy turn before showing an error. */
+/** The model worker is shared; retry a busy turn before showing an error. */
 const BUSY_RETRY_MS = 1_500;
 const MAX_BUSY_RETRIES = 2;
 /** Model + tool rounds + streamed TTS need more than a single request. */
@@ -56,9 +58,9 @@ const REQUEST_TURN_DEBUG = process.env.NODE_ENV !== "production";
 
 /**
  * One affinity id per browser session, kept in a cookie so it survives
- * reloads. Baseten routes requests that share it to the same replica, so the
- * system prompt and the growing history stay in that replica's prompt cache
- * and bill at the cached input rate.
+ * reloads. The server sends it as `prompt_cache_key`, which groups the
+ * conversation's turns so the system prompt and the growing history stay
+ * prompt-cacheable and bill at the cached input rate.
  */
 const AFFINITY_COOKIE = "atlas-affinity";
 
@@ -151,9 +153,9 @@ function turnErrorMessage(error: unknown) {
  * One orb turn, from request to caption.
  *
  * Voice and typed turns share the same orchestration: abort the previous one,
- * reset, stream NDJSON with a busy retry, and reveal the reply on the first
- * audio chunk, the MP3 fallback, or an error after the text arrived. The
- * dashboard only owns the microphone, the orb, and the panel.
+ * reset, stream NDJSON with a busy retry, and reveal the reply when the reply
+ * text closes (the browser then speaks it) or an error arrives after the text
+ * arrived. The dashboard only owns the microphone, the orb, and the panel.
  */
 export function useOrbTurn({
   history,
@@ -175,6 +177,8 @@ export function useOrbTurn({
   const receivedPcmRef = useRef(false);
   /** Guards late `speechSynthesis` events after a stop or a newer turn. */
   const browserTokenRef = useRef(0);
+  /** The onboarding pace, so the browser voice matches the chosen tone. */
+  const paceRef = useRef<PaceId>("steady");
   /** Tool rows already announced during this turn, newest last. */
   const toolsRef = useRef<ToolTrace[]>([]);
   /** Latest props, so stable callbacks can find the current turn's user row. */
@@ -189,6 +193,21 @@ export function useOrbTurn({
     onToolRequestRef.current = onToolRequest;
     speechRef.current = speech;
   }, [history, onNewSession, onToolRequest, speech]);
+
+  // The browser voice speaks at the pace chosen in onboarding. Loaded once;
+  // a later onboarding pass takes effect for the turn after the next reload
+  // of the dashboard, which is fine for a tone preference.
+  useEffect(() => {
+    let cancelled = false;
+
+    void loadOnboarding().then((saved) => {
+      if (!cancelled && saved?.pace) paceRef.current = saved.pace;
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [aiState, setAiState] = useState<AiState>("idle");
   const [aiReply, setAiReply] = useState<string | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
@@ -324,8 +343,10 @@ export function useOrbTurn({
   }, []);
 
   /**
-   * Say the reply with the browser's own voice. This is the fallback when the
-   * server produced no audio: simple, no download, no MP3 file.
+   * Say the reply with the browser's own voice — the primary delivery since
+   * speech moved out of the server. Calm and smooth by construction: the
+   * utterance builds in `createCalmUtterance`, which strips narration labels
+   * and sets the calm rate and pitch for the chosen pace.
    */
   const speakWithBrowser = useCallback((text: string) => {
     const clean = text.trim();
@@ -341,9 +362,15 @@ export function useOrbTurn({
       return;
     }
 
+    const utterance = createCalmUtterance(clean, paceRef.current);
+
+    if (!utterance) {
+      setAiState("idle");
+      return;
+    }
+
     browserTokenRef.current += 1;
     const token = browserTokenRef.current;
-    const utterance = new SpeechSynthesisUtterance(clean);
 
     utterance.onend = () => {
       if (browserTokenRef.current !== token) return;
@@ -373,8 +400,14 @@ export function useOrbTurn({
     }
 
     try {
+      // A failure must stay clear; keep the default rate and just route
+      // through the shared strip so labels never reach the voice.
+      const utterance = createCalmUtterance(clean);
+
+      if (!utterance) return;
+
       window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(new SpeechSynthesisUtterance(clean));
+      window.speechSynthesis.speak(utterance);
     } catch {
       // The caption still carries the message.
     }
@@ -562,9 +595,9 @@ export function useOrbTurn({
           return;
         }
 
-        // The route sends audio-done after the PCM chunks; when none arrived
-        // the server produced no audio, so reveal the text and let the
-        // browser say it instead of playing an MP3 download.
+        // The route closes the audio sequence after the reply text; with the
+        // browser voice there is no PCM, so this is the moment the reply text
+        // reveals and the browser starts speaking it.
         const turn = finalTurnRef.current;
 
         if (
@@ -755,7 +788,6 @@ export function useOrbTurn({
           );
 
           const saved = await loadOnboarding();
-          if (saved?.voiceId) form.append("voice", saved.voiceId);
           if (saved?.pace) form.append("pace", saved.pace);
 
           const profile = parseProfile(saved);
@@ -828,7 +860,6 @@ export function useOrbTurn({
               history: toModelHistory(
                 trimHistory(history, MAX_HISTORY_TOKENS),
               ),
-              voice: saved?.voiceId ?? undefined,
               pace: saved?.pace ?? undefined,
               ...(profile ? { profile } : {}),
               reminders: await buildReminderSnapshot(),

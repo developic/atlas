@@ -1,9 +1,10 @@
 /**
  * Server-only camera-clip describer for the `frame` tool.
  *
- * The main chat endpoint has no video input, so a short clip goes to the
- * video-capable model and comes back as a typed description. The conversational
- * model then answers in its own voice with the user's mode rules applied.
+ * The main chat endpoint receives text and images (audio on 1.2), so a short
+ * clip goes to the video-capable model on the Responses endpoint and comes
+ * back as a typed description. The conversational model then answers in its
+ * own voice with the user's mode rules applied.
  */
 
 import {

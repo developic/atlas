@@ -1,6 +1,6 @@
 "use client";
 
-import { EarOff, EyeOff, Flower2, MicOff, Volume2, type LucideIcon } from "lucide-react";
+import { EarOff, EyeOff, Flower2, MicOff, type LucideIcon } from "lucide-react";
 
 import { ACCESS_MODES, type AccessMode } from "@/lib/access-modes";
 import { cn } from "@/lib/utils";
@@ -32,9 +32,6 @@ const MODE_META: Record<AccessMode, { label: string; hint: string; icon: LucideI
 type AccessBarProps = {
   mode: AccessMode;
   onChange: (next: AccessMode) => void;
-  /** Mute only: spoken replies the user opted into. */
-  voiceReplies?: boolean;
-  onVoiceRepliesChange?: (next: boolean) => void;
   className?: string;
 };
 
@@ -45,8 +42,6 @@ type AccessBarProps = {
 export function AccessBar({
   mode,
   onChange,
-  voiceReplies = false,
-  onVoiceRepliesChange,
   className,
 }: AccessBarProps) {
   return (
@@ -90,22 +85,6 @@ export function AccessBar({
         <p aria-live="polite" className="text-center font-mono text-[11px] text-ink-muted">
           {MODE_META[mode].hint}
         </p>
-        {mode === "mute" && onVoiceRepliesChange ? (
-          <button
-            type="button"
-            onClick={() => onVoiceRepliesChange(!voiceReplies)}
-            aria-pressed={voiceReplies}
-            className={cn(
-              "inline-flex min-h-8 items-center gap-1 rounded-full border px-2.5 font-mono text-[11px] transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-              voiceReplies
-                ? "border-sage bg-sage-wash text-ink"
-                : "border-line text-ink-muted hover:text-ink",
-            )}
-          >
-            <Volume2 aria-hidden="true" className="size-3.5" strokeWidth={2} />
-            Voice replies {voiceReplies ? "on" : "off"}
-          </button>
-        ) : null}
       </div>
     </nav>
   );

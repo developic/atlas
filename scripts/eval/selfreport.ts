@@ -1,6 +1,6 @@
 /**
- * Self-analysis probe: asks the EVALUATED model (same Baseten model, no
- * tools, no system prompt) to explain a transcript after the fact.
+ * Self-analysis probe: asks the EVALUATED model (same Meta Model API model,
+ * no tools, no system prompt) to explain a transcript after the fact.
  *
  * The explanation is diagnostic evidence only — never proof of the original
  * reasoning. Every claim gets compared against the recorded wire.
@@ -10,15 +10,15 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { metaClient } from "../../src/lib/meta-client";
+import { META_TEXT_MODEL } from "../../src/lib/model";
 
 const dirName = fileURLToPath(new URL(".", import.meta.url));
 const runLabel = process.argv[2];
 const scenarioId = process.argv[3];
 const baseDir = process.env.EVAL_OUT_DIR ?? join(dirName, "runs");
 
-const apiKey = process.env.BASETEN_API_KEY?.trim();
-
-if (!apiKey) throw new Error("BASETEN_API_KEY missing");
+if (!process.env.MODEL_API_KEY?.trim()) throw new Error("MODEL_API_KEY missing");
 if (!runLabel || !scenarioId) throw new Error("usage: bun selfreport.ts <runLabel> <scenarioId>");
 
 const data = JSON.parse(readFileSync(join(baseDir, runLabel, `${scenarioId}.json`), "utf8"));
@@ -61,21 +61,15 @@ const message = [
   transcript,
 ].join("\n");
 
-const response = await fetch("https://inference.baseten.co/v1/chat/completions", {
-  method: "POST",
-  headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-  body: JSON.stringify({
-    model: "meta-models/muse-spark-open-1026",
-    max_tokens: 1_200,
-    temperature: 0.1,
-    reasoning_effort: "low",
-    messages: [{ role: "user", content: message }],
-  }),
+const response = await metaClient().chat.completions.create({
+  model: META_TEXT_MODEL,
+  max_completion_tokens: 1_200,
+  temperature: 0.1,
+  reasoning_effort: "low",
+  messages: [{ role: "user", content: message }],
 });
 
-const payload = (await response.json()) as {
-  choices?: Array<{ message?: { content?: string; reasoning_content?: string } }>;
-};
+const content = response.choices[0]?.message?.content;
 
 const metaDir = join(baseDir, "meta");
 mkdirSync(metaDir, { recursive: true });
@@ -83,7 +77,7 @@ mkdirSync(metaDir, { recursive: true });
 const out = {
   run: runLabel,
   scenario: scenarioId,
-  self: payload.choices?.[0]?.message?.content ?? "",
+  self: content ?? "",
 };
 
 writeFileSync(join(metaDir, `${runLabel}-${scenarioId}.json`), JSON.stringify(out, null, 2));

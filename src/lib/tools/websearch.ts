@@ -125,7 +125,6 @@ export const websearchTool: OrbTool = {
   type: "function",
   function: {
     name: "websearch",
-    strict: true,
     description:
       "Search the web for news, prices, releases, schedules, scores, or any fact that may have changed since training. Use it before answering when the answer depends on current or verifiable information. Returns up to eight titled results with short highlights. Do not use it for stable knowledge you already have, for arithmetic, or for opinions.",
     parameters: {

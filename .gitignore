@@ -55,4 +55,7 @@ next-env.d.ts
 .vscode/
 *.log
 
+# demo recordings (large MP4 artifacts, regenerated on demand)
+recordings/
+
 certificates

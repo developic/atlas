@@ -21,7 +21,7 @@ import {
  PaceStep,
  DisabilityStep,
 } from "@/components/start/start-steps";
-import { ATLAS_VOICE_ID, useVoicePreview } from "@/components/start/use-voice-preview";
+import { useVoicePreview } from "@/components/start/use-voice-preview";
 import { saveOnboarding } from "@/lib/onboarding";
 import { cn } from "@/lib/utils";
 
@@ -33,13 +33,9 @@ export function StartFlow() {
  const [ageRange, setAgeRange] = useState<AgeRange | null>(null);
  const [paceId, setPaceId] = useState<PaceId>("steady");
  const [disability, setDisability] = useState<Disability | null>(null);
- const [finalPreviewState, setFinalPreviewState] = useState<
- "idle" | "loading" | "error"
- >("idle");
  const headingRef = useRef<HTMLHeadingElement>(null);
- const finalPreviewAbortRef = useRef<AbortController | null>(null);
  const mounted = useRef(false);
- const { supported, speakingId, play, playBlob, stop } =
+ const { supported, speakingId, play, playName, stop } =
  useVoicePreview();
 
  const stepIndex = STEP_INDEX[step];
@@ -70,9 +66,9 @@ const STEP_NAMES: Record<Step, string> = {
 
  useEffect(() => {
  return () => {
- finalPreviewAbortRef.current?.abort();
+ stop();
  };
- }, []);
+ }, [stop]);
 
  // Commit the answers once the review step is reached, so `/dashboard` can
  // pick up where this left off. Earlier steps stay provisional: backing out
@@ -83,7 +79,6 @@ const STEP_NAMES: Record<Step, string> = {
  void saveOnboarding({
  name: trimmedName,
  ageRange,
- voiceId: ATLAS_VOICE_ID,
  pace: paceId,
  disability,
  });
@@ -93,9 +88,6 @@ const STEP_NAMES: Record<Step, string> = {
  nextStep: Step,
  nextDirection: StepDirection = "forward",
  ) => {
- finalPreviewAbortRef.current?.abort();
- finalPreviewAbortRef.current = null;
- setFinalPreviewState("idle");
  stop();
  setDirection(nextDirection);
  setHasNavigated(true);
@@ -142,51 +134,15 @@ const STEP_NAMES: Record<Step, string> = {
  goToStep("disability");
  };
 
- const handleFinalPreview = async () => {
+ const handleFinalPreview = () => {
  if (speakingId === "final") {
  stop();
  return;
  }
 
- finalPreviewAbortRef.current?.abort();
- const controller = new AbortController();
- finalPreviewAbortRef.current = controller;
- setFinalPreviewState("loading");
-
- try {
- const response = await fetch("/api/voice-preview", {
- method: "POST",
- headers: { "Content-Type": "application/json" },
- body: JSON.stringify({
- name: trimmedName,
- voiceId: ATLAS_VOICE_ID,
- pace: selectedPace.id,
- }),
- signal: controller.signal,
- });
-
- if (!response.ok) {
- throw new Error("Preview request failed");
- }
-
- const blob = await response.blob();
-
- if (controller.signal.aborted) return;
-
- playBlob(blob, "final");
- setFinalPreviewState("idle");
- } catch {
- if (controller.signal.aborted) return;
-
- // Keep the screen useful if Deepgram is unavailable: fall back to the
- // matching pre-recorded sample.
- setFinalPreviewState("error");
- play(selectedPace.id, "final");
- } finally {
- if (finalPreviewAbortRef.current === controller) {
- finalPreviewAbortRef.current = null;
- }
- }
+ // The browser voice is the reply voice, so the preview is the same engine
+ // and tone the dashboard will use — no server synthesis, no fallback.
+ playName(trimmedName, selectedPace.id, "final");
  };
 
  const handleDisabilitySelect = (id: Disability) => {
@@ -301,7 +257,6 @@ const STEP_NAMES: Record<Step, string> = {
  selectedPace={selectedPace}
  speakingId={speakingId}
  supported={supported}
- finalPreviewState={finalPreviewState}
  onFinalPreview={handleFinalPreview}
  onEdit={(nextStep) => goToStep(nextStep, "back")}
  onBack={() => goToStep("disability", "back")}

@@ -75,3 +75,20 @@ export async function applyMoodDirectives(
     }
   }
 }
+
+/**
+ * Delete entries by id (used to clear sample/demo data without touching the
+ * real log). Returns the exact count removed, 0 when storage is unavailable
+ * or nothing matched. Never throws.
+ */
+export async function dbDeleteMoods(ids: string[]): Promise<number> {
+  if (!isDbAvailable() || ids.length === 0) return 0;
+
+  try {
+    const deleted = await getDb()?.moods.where("id").anyOf(ids).delete();
+    return deleted ?? 0;
+  } catch (error) {
+    report("delete", error);
+    return 0;
+  }
+}

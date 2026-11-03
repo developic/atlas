@@ -11,8 +11,7 @@
     "typecheck": "next typegen && tsc --noEmit",
     "test": "bun test tests/",
     "eval:live": "bun scripts/eval/runner.ts",
-    "generate:voices": "bun scripts/generate-deepgram-voices.mjs",
-    "probe:omni": "bun scripts/omni-probe.mjs",
+    "probe:model": "bun scripts/model-probe.mjs",
     "vad-server": "bun scripts/vad-server.mjs",
     "postinstall": "bun scripts/copy-vad-assets.mjs",
     "fmt": "bun fmt"
@@ -31,6 +30,8 @@
     "next": "16.4.2",
     "onnxruntime-node": "1.22.0",
     "onnxruntime-web": "1.31.1",
+    "openai": "^7.47.0",
+    "openai": "^7.47.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-markdown": "^10.1.0",

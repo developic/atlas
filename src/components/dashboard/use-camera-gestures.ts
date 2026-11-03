@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { MouseEvent } from "react";
 
+import { createCalmUtterance } from "@/lib/browser-voice";
 import type { SignVideoStatus } from "@/components/dashboard/use-sign-video";
 
 /** Two taps closer than this are one gesture. */
@@ -57,13 +58,13 @@ export function useCameraGestures({
 
     try {
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
-        window.speechSynthesis.speak(
-          new SpeechSynthesisUtterance(
-            closing
-              ? "Camera off."
-              : "Camera on. Obstacle warnings are active.",
-          ),
+        const utterance = createCalmUtterance(
+          closing
+            ? "Camera off."
+            : "Camera on. Obstacle warnings are active.",
         );
+
+        if (utterance) window.speechSynthesis.speak(utterance);
       }
     } catch {
       // The camera still toggled; only the confirmation is missing.

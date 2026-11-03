@@ -20,7 +20,7 @@ export type TurnDebugRound = {
   ms: number;
   /** Whether tool calling was enabled for this call. */
   tools: boolean;
-  /** The parsed Baseten chat-completion payload. */
+  /** The parsed provider chat-completion payload. */
   response: unknown;
 };
 

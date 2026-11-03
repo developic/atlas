@@ -79,8 +79,6 @@ export type OrbTool = {
   function: {
     name: OrbToolName;
     description: string;
-    /** Set on native calls only; harmless in the JSON protocol. */
-    strict?: boolean;
     parameters: {
       type: "object";
       properties: Record<string, ToolParameter>;
