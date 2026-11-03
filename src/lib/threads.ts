@@ -16,6 +16,9 @@ export type ChatThread = {
   updatedAt: number;
 };
 
+/** Longest thread title kept; the sidebar truncates visually as well. */
+export const THREAD_TITLE_MAX = 80;
+
 /** Title from the first user message, like a chat list preview. */
 export function threadTitleFor(
   messages: ChatMessage[],
@@ -27,7 +30,7 @@ export function threadTitleFor(
 
   if (!first) return fallback;
 
-  return first.content.trim().split("\n")[0];
+  return first.content.trim().split("\n")[0].slice(0, THREAD_TITLE_MAX) || fallback;
 }
 
 export function createThread(messages: ChatMessage[] = []): ChatThread {
