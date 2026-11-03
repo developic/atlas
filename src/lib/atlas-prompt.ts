@@ -76,8 +76,6 @@ function basePromptFor(mode: AccessMode | null): string {
   ].join("\n");
 }
 
-export const ATLAS_SYSTEM_PROMPT = basePromptFor(null);
-
 export function buildAtlasSystemPrompt(
   now = new Date(),
   profile?: UserProfile,
