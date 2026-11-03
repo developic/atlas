@@ -1031,6 +1031,55 @@ export function DashboardFlow() {
           onVoiceRepliesChange={setVoiceReplies}
           className="mb-4"
         />
+        {/* Camera + Sign controls sit above the orb: the pointer path down to
+            the chatbox no longer crosses these hover-active buttons. */}
+        <div className="mb-4 flex w-full max-w-md flex-col items-center gap-3">
+          <div className="flex flex-wrap items-center justify-center gap-3">
+            <button
+              type="button"
+              onClick={toggleCamera}
+              className="rounded-full border border-line px-4 py-2 font-mono text-xs text-ink-muted transition-colors hover:border-sage hover:text-ink"
+            >
+              {signCameraLabel}
+            </button>
+            {signAllowed && signStatus === "live" ? (
+              <button
+                type="button"
+                disabled={!canSign}
+                onClick={handleSignToggle}
+                aria-label={signing ? "Stop and send signing" : signTranscribing ? "Reading your signing" : "Start signing"}
+                className="touch-none rounded-full border border-sage px-4 py-2 font-mono text-xs text-sage-text transition-colors select-none disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {signing ? "Recording… tap to send" : signTranscribing ? "Reading…" : "Sign"}
+              </button>
+            ) : null}
+          </div>
+          {signAllowed && signStatus === "live" && !busy ? (
+            <p className="text-center font-mono text-[11px] text-ink-muted">
+              Tap Sign, sign in ASL, then tap again to send. Keep both hands
+              in frame with good light.
+            </p>
+          ) : null}
+          {signStatus === "error" && signError ? (
+            <p role="alert" className="max-w-xs text-center font-mono text-[11px] text-ink-muted">
+              {signError}
+            </p>
+          ) : null}
+          {signTranscribing ? (
+            <p className="text-center font-mono text-[11px] text-ink-muted" aria-live="polite">
+              Reading your signing…
+            </p>
+          ) : null}
+          {capabilities.guard ? (
+            <div
+              aria-live="polite"
+              className="max-w-xs text-center font-mono text-[11px] leading-relaxed text-ink-muted"
+            >
+              <p>{guardHint}</p>
+              {guard.lastWarning ? <p>Last warning: {guard.lastWarning}</p> : null}
+            </div>
+          ) : null}
+        </div>
         <button
           type="button"
           onClick={() => setSidebarOpen((current) => !current)}
@@ -1105,54 +1154,6 @@ export function DashboardFlow() {
           onSwitch={switchThread}
           onDelete={deleteThread}
         />
-
-        <div className="mt-6 flex w-full max-w-md flex-col items-center gap-3">
-          <div className="flex flex-wrap items-center justify-center gap-3">
-            <button
-              type="button"
-              onClick={toggleCamera}
-              className="rounded-full border border-line px-4 py-2 font-mono text-xs text-ink-muted transition-colors hover:border-sage hover:text-ink"
-            >
-              {signCameraLabel}
-            </button>
-            {signAllowed && signStatus === "live" ? (
-              <button
-                type="button"
-                disabled={!canSign}
-                onClick={handleSignToggle}
-                aria-label={signing ? "Stop and send signing" : signTranscribing ? "Reading your signing" : "Start signing"}
-                className="touch-none rounded-full border border-sage px-4 py-2 font-mono text-xs text-sage-text transition-colors select-none disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {signing ? "Recording… tap to send" : signTranscribing ? "Reading…" : "Sign"}
-              </button>
-            ) : null}
-          </div>
-          {signAllowed && signStatus === "live" && !busy ? (
-            <p className="text-center font-mono text-[11px] text-ink-muted">
-              Tap Sign, sign in ASL, then tap again to send. Keep both hands
-              in frame with good light.
-            </p>
-          ) : null}
-          {signStatus === "error" && signError ? (
-            <p role="alert" className="max-w-xs text-center font-mono text-[11px] text-ink-muted">
-              {signError}
-            </p>
-          ) : null}
-          {signTranscribing ? (
-            <p className="text-center font-mono text-[11px] text-ink-muted" aria-live="polite">
-              Reading your signing…
-            </p>
-          ) : null}
-          {capabilities.guard ? (
-            <div
-              aria-live="polite"
-              className="max-w-xs text-center font-mono text-[11px] leading-relaxed text-ink-muted"
-            >
-              <p>{guardHint}</p>
-              {guard.lastWarning ? <p>Last warning: {guard.lastWarning}</p> : null}
-            </div>
-          ) : null}
-        </div>
 
         {capabilities.chatbox ? (
           <Chatbox onSendText={sendTextWithMedia} />
