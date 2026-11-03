@@ -22,10 +22,11 @@
  */
 
 import { buildAtlasSystemPrompt } from "./atlas-prompt";
+import { parseSignFrames } from "./media-frames";
 import type { AccessMode } from "./access-modes";
 import { capabilitiesFor, isToolAllowed, toolsForMode } from "./access-modes";
 import type { UserProfile } from "./onboarding";
-import { joinCardMarkdown, MAX_CARDS, type CardContent } from "./cards";
+import { describeCardOverflow, joinCardMarkdown, MAX_CARDS, type CardContent } from "./cards";
 import type { ChatMessage } from "./chat-message";
 import { MAX_TRANSCRIPT_CHARS, normalizeSpeech } from "./orb-turn";
 import { OrbError } from "./orb-errors";
@@ -41,7 +42,6 @@ import {
 } from "./moods";
 import {
   executeTool,
-  ORB_TOOLS,
   parseNativeToolCalls,
   toolsFor,
   type NativeCall,
@@ -65,19 +65,16 @@ import type { TurnDebug, TurnDebugRound } from "./turn-debug";
 const BASETEN_MODEL = "meta-models/muse-spark-open-1026";
 const BASETEN_URL = "https://inference.baseten.co/v1/chat/completions";
 /**
- * 1_200 truncated six-card `create` calls (finish_reason "length"), and the
- * force-speak repair then discarded the screen work. 3_000 stays far below
- * the validator caps (6 × 4k chars of card content) while giving structured
- * tool calls room to complete in one piece.
+ * 1_200 truncated six-card `create` calls (finish_reason "length"). 3_000
+ * stays far below the validator caps (6 × 4k chars of card content) while
+ * giving structured tool calls room to complete in one piece.
  */
 const DEFAULT_MAX_REPLY_TOKENS = 3_000;
 const MODEL_TIMEOUT_MS = 60_000;
 const REASONING_EFFORT = "low";
 const MAX_SESSION_CHARS = 64;
-/** Tools offered when the turn must end with speech and nothing else. */
-const SPEAK_ONLY_TOOLS = ORB_TOOLS.filter(
-  (tool) => tool.function.name === "speak",
-);
+/** Safety bound on native tool rounds; the 90 s budget remains the primary stop. */
+const MAX_TOOL_ROUNDS = 12;
 
 export const TURN_BUDGET_MS = 90_000;
 
@@ -245,15 +242,6 @@ type ModelResult = {
   nativeToolCalls: NativeToolCall[];
 };
 
-type TurnOptions = {
-  allowTools?: boolean;
-  /**
-   * Send only the speak tool and require a native call to it. A final answer
-   * must pass validation, and only a tool call runs it.
-   */
-  forceSpeak?: boolean;
-};
-
 // ---------------------------------------------------------------------------
 // Entry points
 // ---------------------------------------------------------------------------
@@ -309,7 +297,8 @@ export async function respondToText(
 
 function audioFormat(mimeType: string): "wav" | "mp3" {
   const mime = mimeType.split(";")[0]?.trim().toLowerCase();
-  return mime === "mp3" ? "mp3" : "wav";
+  if (mime.includes("mp3") || mime.includes("mpeg")) return "mp3";
+  return "wav";
 }
 
 // ---------------------------------------------------------------------------
@@ -324,10 +313,7 @@ async function requestTurn(
 ): Promise<OmniTurn> {
   const apiKey = getApiKey();
   const userContent: ContentPart[] = [...content];
-  const frames = (context.mediaFrames ?? []).filter(
-    (frame): frame is string =>
-      typeof frame === "string" && frame.startsWith("data:image/"),
-  );
+  const frames = parseSignFrames(context.mediaFrames ?? []);
 
   if (frames.length > 0) {
     for (const frame of frames) {
@@ -419,6 +405,10 @@ async function requestTurn(
       throw new OrbError("timeout", "The assistant ran out of time. Try again.");
     }
 
+    if (toolRounds >= MAX_TOOL_ROUNDS) {
+      throw new OrbError("timeout", "The assistant ran out of time. Try again.");
+    }
+
     const seen = reporterFor(callbacks);
 
     result = await runModelTurn(apiKey, messages, seen, run, tools);
@@ -465,7 +455,12 @@ async function requestTurn(
 
     const outcomes = await executeNativeCalls(calls, runCache, run.signal, toolContext);
 
-    for (const outcome of outcomes) {
+    /** Cards this round produced but the six-card fold could not show, per outcome. */
+    const droppedByOutcome: number[] = [];
+
+    for (const [index, outcome] of outcomes.entries()) {
+      droppedByOutcome[index] = 0;
+
       if (!outcome.ok || !outcome.result || !outcome.key) continue;
 
       // A deduped repeat call re-resolves its stored result; fold it into the
@@ -474,7 +469,7 @@ async function requestTurn(
 
       committed.add(outcome.key);
       state.sources.push(...outcome.result.sources);
-      collectCards([outcome.result], state);
+      droppedByOutcome[index] = collectCards([outcome.result], state);
 
       if (outcome.result.newSession) {
         state.newSession = true;
@@ -511,9 +506,13 @@ async function requestTurn(
     // approved. Without this the native-only loop would make one more model call.
     // Exception: a round of only `speak` with no action behind it yet does
     // not end the turn — the model may act after speaking.
+    // Exception: a round that overflowed the card fold never ends the turn —
+    // the drop note below must reach the model so it repairs the speech
+    // instead of finalizing on words about cards that are not on screen.
     const allOk = outcomes.every((outcome) => outcome.ok);
+    const roundDropped = droppedByOutcome.reduce((sum, n) => sum + (n ?? 0), 0);
 
-    if (allOk && calls.every(isTerminalCall) && state.speakSegments.length > 0) {
+    if (allOk && calls.every(isTerminalCall) && state.speakSegments.length > 0 && roundDropped === 0) {
       const speakOnly =
         calls.every((call) => call.request?.tool === "speak") &&
         !roundActionsRan;
@@ -536,7 +535,8 @@ async function requestTurn(
     const roundLabel = `[Round ${toolRounds + 1}]`;
     messages.push(echoedAssistant(result, calls));
     for (const [index, outcome] of outcomes.entries()) {
-      messages.push({ role: "tool", tool_call_id: calls[index].id, content: `${roundLabel} ${outcome.content}` });
+      const note = describeCardOverflow(droppedByOutcome[index] ?? 0);
+      messages.push({ role: "tool", tool_call_id: calls[index].id, content: `${roundLabel} ${outcome.content}${note ? ` ${note}` : ""}` });
     }
 
     if (calls.some((call) => call.request && call.request.tool !== "speak")) {
@@ -559,6 +559,7 @@ function isTerminalCall(call: NativeCall): boolean {
       call.request.tool === "open_camera" ||
       call.request.tool === "shutdown" ||
       call.request.tool === "reminder" ||
+      call.request.tool === "mood" ||
       call.request.tool === "speak")
   );
 }
@@ -694,19 +695,28 @@ function restrictCalls(calls: NativeCall[], mode: AccessMode | null): NativeCall
 /**
  * Collect unique cards from create results, assigning stable ids when the
  * model omitted or duplicated one, and stopping at the six-card cap.
+ * Returns the number of produced cards the fold could not show, so the round
+ * can tell the model what actually landed on screen.
  */
-function collectCards(cards: ToolResult[], state: TurnState): void {
+function collectCards(cards: ToolResult[], state: TurnState): number {
+  let dropped = 0;
+
   for (const result of cards) {
     const produced = result.cards ?? [];
 
     for (const producedCard of produced) {
-      if (state.cards.length >= MAX_CARDS) continue;
+      if (state.cards.length >= MAX_CARDS) {
+        dropped += 1;
+        continue;
+      }
 
       const card = { ...producedCard, id: uniqueCardId(producedCard.id, state.cards) };
 
       state.cards.push(card);
     }
   }
+
+  return dropped;
 }
 
 function uniqueCardId(raw: string, existing: CardContent[]): string {
@@ -901,12 +911,8 @@ async function runModelTurn(
   callbacks: TurnCallbacks,
   run: TurnRun,
   tools: readonly OrbTool[],
-  options: TurnOptions = {},
 ): Promise<ModelResult> {
-  let result = await callModel(apiKey, messages, run, {
-    tools: options.allowTools !== false ? tools : undefined,
-    forceSpeak: options.forceSpeak,
-  });
+  let result = await callModel(apiKey, messages, run, { tools });
 
   if (result.finishReason === "length") {
     result = await callModel(
@@ -936,7 +942,7 @@ async function callModel(
   apiKey: string,
   messages: Message[],
   run: TurnRun,
-  options: { tools?: readonly OrbTool[]; forceSpeak?: boolean } = {},
+  options: { tools?: readonly OrbTool[] } = {},
 ): Promise<ModelResult> {
   const startedAt = performance.now();
   const response = await postModel(
@@ -948,16 +954,11 @@ async function callModel(
       temperature: 0.1,
       reasoning_effort: REASONING_EFFORT,
       ...(options.tools && options.tools.length > 0
-        ? options.forceSpeak
-          ? {
-              tools: SPEAK_ONLY_TOOLS,
-              tool_choice: { type: "function", function: { name: "speak" } },
-            }
-          : {
-              tools: options.tools,
-              tool_choice: "auto",
-              parallel_tool_calls: true,
-            }
+        ? {
+            tools: options.tools,
+            tool_choice: "auto",
+            parallel_tool_calls: true,
+          }
         : {}),
     },
     run,
@@ -1022,7 +1023,7 @@ async function postModel(
       throw new OrbError("timeout", "The assistant took too long to think. Try again.");
     }
 
-    throw new OrbError("audio", "The assistant is unavailable.");
+    throw new OrbError("config", "The assistant is unavailable.");
   }
 
   if (response.status === 401 || response.status === 403) {
@@ -1036,7 +1037,7 @@ async function postModel(
   }
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
-    throw new OrbError("audio", `Muse Spark Open failed (${response.status}): ${detail.slice(0, 200)}`);
+    throw new OrbError("config", `Muse Spark Open failed (${response.status}): ${detail.slice(0, 200)}`);
   }
 
   return response;
