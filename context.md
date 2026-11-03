@@ -1,5 +1,200 @@
 # Project Context
 
+## 2026-11-03 21:53 IST (16:23 UTC) — Added `tests/` to `.gitignore`
+
+- Appended `/tests/` under the `# testing` block in `.gitignore` per owner request. Note: the existing tracked test files stay tracked — gitignore only applies to untracked paths, so this takes effect only if the files are ever untracked/removed. Nothing staged or committed.
+
+## 2026-11-03 20:39 IST (15:09 UTC) — Deleted the demo tooling scripts
+
+- Follow-up to the `/test` + `/demo` removal: `scripts/generate-audio.mjs` (Cartesia one-shot TTS CLI), its `generate:audio` line in `package.json`, `scripts/record-demo.py` (headless-Chromium `/demo` recorder) and `scripts/requirements-record.txt` are gone — every one of them existed only to serve the deleted demo, and `generate:audio` had no remaining caller. Supersedes the "kept `generate-audio.mjs`" note in the entry above. `bun run generate:voices` (Deepgram) is untouched.
+- Stale references: none outside `.next/` build artifacts (regenerated on the next build) and the historical `context.md` entries below. Verified: `bun run test` 150 pass / 0 fail, `typecheck` clean, `lint` 0 errors. Nothing staged or committed.
+
+## 2026-11-03 20:34 IST (15:04 UTC) — Deleted `/test` and `/demo` pages
+
+- Removed the `/test` manual consoles (`src/app/test/`: orb-client, hand-client, sign-client, test-console) and the `/demo` scripted film (`src/app/demo/`, `src/components/demo/`, `public/demo/audio/`, and the three offline suites `demo-intro`/`meet-atlus`/`frame3`). Neither route was linked from production chrome. Tradeoff: the orb/hand/sign debug consoles and the recordable demo film are gone — recover from git history (`src/app/test` was tracked; the demo was untracked WIP) if needed later.
+- Stale references cleaned in the same change: `AGENTS.md` codebase map (route + `components/demo` blocks), `tests/README.md` file table (incl. the already-dead `demo-script.test.js` row), and the `sign-prompt.ts` header comment that pointed at `app/test/sign-client.tsx`. Kept `scripts/generate-audio.mjs` (`bun run generate:audio`) as a general TTS tool; `scripts/record-demo.py` + `requirements-record.txt` remain but now have no page to record.
+- Verified: `bun run test` 150 pass / 0 fail (13 files), `bun run typecheck` clean, `bun run lint` exit 0 (pre-existing warnings only). Nothing staged or committed.
+
+## 2026-11-03 17:45 IST (12:15 UTC) — Docker builder fix: full install for `next build`
+
+- Your next `docker build -t atlas` failure: `Cannot find module '@tailwindcss/turbopack'` — the deps stage installed `--production` only, but `next build` needs devDependencies (Tailwind's turbopack plugin). Changed to plain `bun install --frozen-lockfile` with a comment; the final image stays slim because the runner stage only takes the standalone output + the VAD runtime set.
+- Verified with a real local `bun run build`: full production build succeeds (13 routes, all API + pages). No app code touched. Re-run the docker build. Nothing staged or committed.
+
+## 2026-11-03 17:40 IST (12:10 UTC) — Docker deps-stage fix: postinstall script missing from context
+
+- Your `docker build -t atlas` failed because the deps stage copies only `package.json` + `bun.lock`, so the root `postinstall` (`bun scripts/copy-vad-assets.mjs`) ran with the script absent → exit 1 → `RUN bun install` failed. Fixed by copying `scripts/copy-vad-assets.mjs` into the deps stage before install (commented in the Dockerfile).
+- Verified the exact production path in an isolated dir: `bun install --frozen-lockfile --production` now succeeds (473 packages), root postinstall copies `public/vad/*`, and the blocked-postinstall `onnxruntime-node` still ships a working prebuilt binding — `InferenceSession.create` on the model succeeds. Note: Bun 1.4.4 blocks dep postinstalls by default (`onnxruntime-node`, `protobufjs`); harmless here since the binding is prebuilt, no `trustedDependencies` change needed.
+- Re-run `docker build -t atlas .` on your side (still no socket permission in this session to build it here). Nothing staged or committed.
+
+## 2026-11-03 17:36 IST (12:06 UTC) — `docker build -t atlas` fixed: postinstall + VAD URL build-arg
+
+- Root cause of a broken `docker build`: `postinstall` still invoked the deleted `scripts/fetch-mediapipe-assets.mjs` (staged deletion, MediaPipe is test-console-only) and exited 1, which fails `RUN bun install`. Fixed to `bun scripts/copy-vad-assets.mjs` only. Verified `bun run postinstall` passes; suite still 202/202, lint unchanged.
+- Added `ARG NEXT_PUBLIC_VAD_URL` (default empty = keep `wss://<host>:8081` fallback) in the builder stage: the client URL is baked at `bun run build`, so plain-HTTP deploys (local docker/LAN) need `--build-arg NEXT_PUBLIC_VAD_URL=ws://<host>:8081`, otherwise browsers refuse wss:// against the plain-ws VAD server.
+- Image runs both processes via `scripts/start-prod.sh`: Next on 8080 (PID 1), VAD WS on 8081. Confirmed no other local daemons exist (only `vad-server.mjs` uses `Bun.serve`; sign/video/Deepgram are remote APIs or browser-side). Keys come from `-e` at run time (`.env` is dockerignored).
+- Still unverified here: actual `docker build`/`run` (no socket permission in this session) and slim-image native libs for onnxruntime. Exact commands for the owner in the final message. Nothing staged or committed.
+
+## 2026-11-03 17:33 IST (12:03 UTC) — VAD server wired into Docker (image build blocked by socket perms)
+
+- `Dockerfile` runner stage now copies the exact VAD runtime set (`scripts/vad-server.mjs`, `scripts/start-prod.sh`, `src/lib/vad-audio.ts`, `src/lib/vad-session.ts`, `node_modules/onnxruntime-{node,common}`; model already rides in `./public/vad`), exposes 8081, and starts both processes via new `scripts/start-prod.sh` (VAD backgrounds, Next takes PID 1 via exec; a VAD startup crash logs a warning but the app still serves). Run with both ports published: `docker run -p 8080:8080 -p 8081:8081 <image>`. Note: Cloud Run routes only one ingress port, so the in-container VAD port serves LAN/compose/VPS deploys, not Cloud Run public traffic.
+- Could not build the image here: `docker build` fails with `permission denied` on `/var/run/docker.sock` (user `sky` is not in the `docker` group, no passwordless sudo). Fix on your side: `sudo usermod -aG docker sky` then re-login, or run the build as root.
+- Verified without Docker instead: replicated the exact runner file set under `/tmp` and ran the server from it — `/healthz` OK, 120 silence windows → zero events, 120 scored / 0 dropped, clean close; `sh -n` on the entrypoint passes. Unverified risk: whether `oven/bun:*-slim` ships the shared libs the ONNX native binding needs (e.g. libgomp) — the first real `docker build && docker run` will show it in the VAD startup log; if it crashes there, add an `apt-get install -y libgomp1` line to the runner stage.
+- Gates: Dockerfile/start-script only (no app code touched) — no test/typecheck impact; `sh -n` clean. Nothing staged or committed.
+
+## 2026-11-03 17:31 IST (12:01 UTC) — Server VAD WebSocket process built and verified live
+
+- New `scripts/vad-server.mjs` (`bun run vad-server`): one shared `onnxruntime-node` session over `public/vad/silero_vad_v6.onnx`, per-connection scoring state (model state, 64-sample context, decision machine, last seq, ordered promise chain). Same wire protocol and events as `use-vad.ts` expects, so the hook swap later needs no protocol change. Env: `VAD_PORT` (8081), `VAD_HOST` (0.0.0.0), `VAD_MODEL_PATH`, `VAD_MAX_CONNECTIONS` (50), optional `VAD_TLS_KEY`/`VAD_TLS_CERT` for wss (required on HTTPS pages — browsers block plain ws). `GET /healthz` for checks. New dep `onnxruntime-node@1.22.0` (the one necessary native dep; verified working under Bun).
+- New pure `src/lib/vad-session.ts`: the per-connection decision machine mirroring `FrameProcessor` frame-for-frame (positive 0.3 onset, sub-0.25 redemption ×56, minimum 9 voiced windows, 25-frame pad, misfire below minimum). Tuning twins `SILERO_VAD_CONFIG` in `use-silero-vad.ts` — left that live file untouched, values pinned by comment + tests instead.
+- Verified live (port 18081): 100 silence windows → zero events; real dialogue extracted from `recordings/atlus-demo.mp4` → `speech-start seq 47` → `speech-end 47–232` (~6 s utterance), a short interjection → `misfire`, 0 dropped, clean closes. Malformed/duplicate/garbage frames ignored without crashing. A unit test caught a real porting bug first (missing redemption-counter reset on voiced frames) — fixed before the live run.
+- Tradeoffs: session shared across connections (stateless by design — state rides inputs, so this is equivalent to per-connection sessions at a fraction of the load); slow consumers backlog to 480 frames then shed load with a counter; `use-vad.ts` still unwired — the hook swap + LAN/TLS setup remain. Pre-existing: `postinstall` fails on the deleted `fetch-mediapipe-assets.mjs` (broke before this change, untouched).
+- Gates: `bun run test` 202/202 pass (new `vad-session.test.js`, 11 tests), `typecheck` clean, `lint` no findings in new files. Nothing staged or committed.
+
+## 2026-11-03 17:24 IST (11:54 UTC) — Remove dead turn-loop and prompt code
+
+- Removed verified-dead code only: `SPEAK_ONLY_TOOLS` const, `TurnOptions` type (`forceSpeak`/`allowTools` — no caller ever set them), and the `forceSpeak` tool-choice branch in `callModel` (`src/lib/model.ts`); `runModelTurn`/`callModel` signatures simplified to always offer the turn's tools with `tool_choice: auto`. Also removed the unreferenced `ATLAS_SYSTEM_PROMPT` export (`src/lib/atlas-prompt.ts` — tests and routes use `buildAtlasSystemPrompt` only). Stale `force-speak repair` comment updated. Tradeoff: none for behavior — the branch was unreachable; the loop, terminal set, and repair path are unchanged.
+- Deliberately not removed: `use-vad.ts` + `lib/vad-audio.ts` (owner's untracked server-VAD WIP, explicitly unwired pending the WS server — not mine to discard), `video`/`validation`/`fetch_failed` error codes (reachable via other routes/tools), `clampWindowDays` (used by `analyzeMood`). No visual or contract change, no new deps.
+- Gates: `bun run test` 191/191 pass, `bun run typecheck` clean, `bun run lint` no findings in the two touched files (37 pre-existing warnings elsewhere). Nothing staged or committed.
+
+## 2026-11-03 17:14 IST (11:44 UTC) — 4-agent tournament: turn-loop and validation hardening
+
+- Ran 4 genuinely independent subagents (frontend arch, UI/UX access, AI arch, QA) through Round 1 independent exploration + Round 2/3 cross-examination and adversarial testing. Resolved conflicts on evidence, not majority vote: kept cache-prefix head order (test-locked + date correctness), kept frame two-turn pipeline (consent/camera-honesty by design), kept mood log non-silent (requires speak to terminate), rejected naive blind CSS fallback and single-audio-owner/single-store proposals (channel mixing, beep/VAD lifetime, offline degrade-not-throw).
+- Implemented 8 low-risk fixes: `model.ts` media filter now uses `parseSignFrames` (jpeg/png, 4-frame/1.2 MB caps) instead of lax `startsWith`; `postModel` network/5xx + route unknown-fallback now `config` (was modality-wrong `audio`); empty-turn without audio/transcript now `validation`; added `MAX_TOOL_ROUNDS=12` time-budget backstop + `mood` in `isTerminalCall` (still requires speak, saves one round); fixed `audioFormat` mp3 detection (`audio/mpeg` → mp3, else wav); `ORB_STATES` now includes `error/disabled`; `retry.ts` case-insensitive Retry-After + `maxAttempts>=1` guard + 30 s delay cap; `THREAD_TITLE_MAX=80` slice in `threadTitleFor`; `mood parseDays` rejects fractions (whole 1–90). No visual identity change, no new deps, no rewrites.
+- Gates: `bun run test` 191/191 pass, `bun run typecheck` clean, `bun run lint` no new errors (pre-existing warnings only). Ad-hoc `bun -e` verified retry casing, title cap, mood fraction refusal, media gif rejection, full ORB_STATES. Remaining risks in final answer; large refactors (god-component split, audio/media owner merge, blind text fallback UI) deliberately deferred.
+
+## 2026-11-03 17:20 IST (11:50 UTC) — Server-VAD client halves created (unwired)
+
+- New `src/lib/vad-audio.ts` (pure, tested): 16 kHz resampling, int16 PCM, seq-prefixed 32 ms binary windows, strict boundary-event parser, reset control. New `src/components/dashboard/use-vad.ts`: server-backed VAD hook with the retired browser hook's exact interface (half-duplex pause, arm delay, misfire) over WebSocket (`NEXT_PUBLIC_VAD_URL`, default `wss://<host>:8081`); segments sliced from a local 32 s ring so padded audio never re-crosses the network; reconnects while the mic is live. Names follow the repo rules (`use-vad`, not `use-backend-vad`).
+- Deliberately not wired into `dashboard-flow.tsx` yet and no server process exists: the WS server (onnxruntime-node, per-connection Silero sessions) is the remaining build, then the hook swap. Browser VAD stays live until then.
+- Gates: 191/191 (new `vad-audio.test.js`), typecheck clean, lint 0 errors. Nothing staged or committed.
+
+## 2026-11-03 17:05 IST (11:35 UTC) — Camera/Sign controls moved above the orb
+
+- The camera toggle + Sign buttons sat directly above the chatbox, so the pointer path down to the chatbox crossed hover-active controls. Moved the whole control block (buttons + sign hints + guard status) to right after the access bar, above the orb; the chatbox now follows the orb/caption with nothing hover-active in between. No behavior or styling changed, only order.
+- Gates: 182/182, typecheck clean, lint 0 errors, `/dashboard` serves 200. Nothing staged or committed.
+
+## 2026-11-03 16:55 IST (11:25 UTC) — Guard drops old warning context after speaking
+
+- Blind-mode guard now discards the carried previous-warning context once after a warning is spoken (`dropPreviousOnce` in `use-vision-guard.ts`): the next check sends `previous: ""` so the verdict is judged purely on fresh post-warning movement, then repeat suppression resumes from that verdict. Flag is set only on the spoken branch — suppressed (unheard) warnings keep context. No clip store existed to discard: each check already records a fresh one-shot clip and the guard route stores nothing; the `previous` text was the only stale state crossing a warning.
+- Gates: 182/182, typecheck clean, lint 0 errors. No offline test covers the browser-only guard loop. Nothing staged or committed.
+
+## 2026-11-03 16:42 IST (11:12 UTC) — Mute/deaf input-output corrected
+
+- The access table had input backwards: mute (can't talk) accepted microphone audio, and deaf (can talk) rejected it. Now mute is `microphone: false` + `speech: "on"` (typed/sign in, voice always out), and deaf is `microphone: true` + `speech: "off"` (voice/typed/sign in, text-only out). The `speak` tool stays excluded from deaf — that tool is Atlas's voice output, not the user's input. One-table change; route validation, dashboard mic/VAD gating, and chatbox follow automatically.
+- Prompt text matches the table (`instructions/modes.ts`): MUTE states the mic stays off and the spoken companion always accompanies text (was "only when voice replies on"); DEAF states the user may speak (transcribed like typing) while replies stay read-only.
+- Tests: `access-modes.test.js` mic/voice-policy pins flipped; `frame3.test.js` capability cross-check updated (the film's own mute line "your voice replies stay on" already matches the new behavior; deaf film lines only promise silent replies, still true). Live: deaf audio accepted with zero PCM, mute audio rejected `validation`, mute text streams PCM with no toggle, deaf text cards-only as before.
+- Gates: 182/182, typecheck clean, lint 0 errors. Nothing staged or committed.
+
+## 2026-11-03 16:31 IST (10:51 UTC) — Hard-battery fixes: silent card-drop note + dictated-speech rule
+
+- Harder Respond API battery (12 probes: ambiguous destructive variants, id/time grounding, cap defiance, dictated claims, route error paths) found two load-bearing issues. (1) H8: user demanded 14 separate cards; model obeyed across three create rounds (6/6/2, each call individually valid), but the turn fold silently kept 6 and speech claimed all 14 on screen — same phantom-claim class as T22, this time caused by a silent server-side drop. (2) H11/H11b: "say the exact words 'timer set' / 'payment of fifty dollars sent'" were voiced as the assistant's own announcements with no marking — a deception primitive the model called "not harmful".
+- Fix 1 (code, structural): `collectCards` now returns the dropped count; the round appends `describeCardOverflow` (new in `cards.ts`, next to the caps it reports) to that round's tool message, and an overflowing round can never be terminal — the model sees the note and repairs instead of finalizing. Counts only, no phrase matching. Fix 2 (prompt): `instructions/cards.ts` — six-card cap wins over explicit one-step-per-card requests, group and say so; `instructions/speech.ts` — dictated action/state words are marked as repetition ("You asked me to say: …") or refused.
+- Verified live: H8 retest groups into 6 with honest "grouped into 6 cards … I kept every step" speech (reasoning quotes the new rule); both dictated probes now mark repetition. Tradeoff: multi-round card overflow adds one repair round. Smoke 11/12 — single typo-camera fail ("opn camra" spoken without the call) reproduced 1/2 on retry with identical reasoning-then-no-call shape: model-side flake, pre-existing class, no prompt change implicated; noted, not fixed.
+- Gates: 182/182 offline (new `card-overflow.test.js` + 2 regression pins), typecheck clean, lint 0 errors, tests/README updated. Nothing staged or committed.
+
+## 2026-11-03 16:10 IST (10:40 UTC) — Prompt fixes for phantom screen-claim and blind ambiguous reset
+
+- Live Respond API stress test (22 probes, all 11 tools, reasoning captured via `debug:true`) found two failures. (1) T22: 14-step sourdough answered in plain text claiming "guide is on screen" with zero `create` calls — speech claimed an action that never ran, slipping past Gate 2 (a code phrase-check is forbidden by the structured-over-prose rule, so the fix is prompt-level). (2) T14: bare "restart" fired destructive `start_new_chat` with no confirmation (matched via "reset" in the tool description).
+- Fix 1 — `instructions/cards.ts`: new act-first bullet at the card-mechanics home ("IF THE TURN NEEDS CARDS AND NO CREATE RESULT CAME BACK YET, CALL create NOW — never end the turn in plain text announcing cards that do not exist"). One rule, one home; pinned strings ("Claims match what actually ran", "second create round") untouched.
+- Fix 2 — `tools/start-new-chat.ts` description (highest decision weight): reset requests must now name the chat/conversation/session/history (typos count); a lone ambiguous "restart" with no chat context, or a topic change, is never a reset — clarify instead.
+- Verified live: sourdough retest creates 6 grouped cards in one call with honest speech; bare "restart" now clarifies ("restart the chat, or something else?") with no reset. Tradeoff accepted: timer-context "restart" now also clarifies ("restart your 9-minute pasta timer, or start a fresh chat?") instead of silently re-creating — safe, one short question, no destructive action either way.
+- Gates: 177/177 offline, typecheck clean, lint 0 errors in touched files, 12/12 live routing smoke (typo-newchat "strat a new chta" still resets — intended path preserved). Held-out set untouched (never tuned against it). Nothing staged or committed.
+
+## 2026-11-03 14:10 IST (08:40 UTC) — Opener de-mixed + Frame 1 tail cut
+
+- The "Ignore background" / "Let's get started" blur was 340 ms of baked-in leading silence inside the two MP3s on top of the table gaps. Stripped start+tail silence from both clips (`narrator-ignore-bg` 2.43 → 2.20 s, `narrator-lets-go` 1.88 → 1.51 s) and set a deliberate 750 ms beat between the lines; opener also starts at 200 ms instead of 400.
+- The long silence before Frame 2 was Frame 1's 5.7 s dead tail (last line ends 36.29 s, scene ran to 42 s). Compressed the exit walks (wheel approaches `-30` at 39.3 s, blind at 38.9 s) and cut the scene to 39.9 s; combined runtime 205.4 → 203.3 s (~3:23). Gesture windows auto-follow `SCENE_END_MS`; the 40_000 walk-out probe was re-pinned to 39_250 (last visible instant — the behavior, not the gesture, goes null past the track end).
+- Gates: 177/177, typecheck clean, lint 0 errors. Nothing staged or committed.
+
+## 2026-11-03 13:57 IST (08:27 UTC) — Crumpled-paper stage + restart replays the whole film
+
+- All three demo frames now sit on a code-generated crumpled paper backdrop (`paper-backdrop.tsx`: static SVG `feTurbulence` + `feDiffuseLighting` + specular pass, seeded — no asset, no randomness, `?seek` stills stay verifiable). Frame 2's curtain veil carries the same paper (was plain `bg-paper` white). The old radial sage wash is gone; tradeoff: the stage glow is dropped for texture contrast.
+- Restart semantics moved to the router (`demo-frames.tsx`): any Replay/R inside any frame remounts the film at Frame 1 (`cycle` epoch in the key). Frames keep a local-runId fallback so direct `?frame=` mounts (recording/review) behave as before. Chaining is unchanged.
+- Regenerated `narrator-ignore-bg.mp3` after the user reported the line "mixed up with the Atlus one" — the generator's default voice is `skylar` (Atlus), so the earlier clip likely shipped the wrong voice; new clip is `gemma`, same text. durationMs 2_590 → 2_429 (measured); opener beat to `lets-go` now 361 ms, pinned in the test.
+- Gates: 177/177, typecheck clean, lint 0 errors. Stills verified: intro/meet/explore + veil mid-pull. Nothing staged or committed.
+
+## 2026-11-03 04:11 IST (22:41 UTC) — Frame 3 cut to ~122 s (mood example out)
+
+- Dropped the blind mood-summary example (the weaker of the two — mood is autism's tool; the ticket read is blind mode's core promise). Guard/watch/outro moved up ~21 s; Frame 3 now 122 s. Removed the two orphaned clips. Combined runtime: 42 + 43 + 122 ≈ 207 s (~3:27) — still over 3:00; the next cut would have to come from Frame 3 vignettes.
+- Verified guard beat at the new timing; gates 177/177, typecheck clean, lint 0 errors. Nothing staged or committed.
+
+## 2026-11-03 04:05 IST (22:35 UTC) — Frame 2 trimmed 45.5 s → 43 s
+
+- Tightened the Frame 2 clock: curtain pull 3.6 s → 2.4 s (phase fractions are progress-relative, so the hand choreography scales untouched), opener/curtain/reveal beats to 200 ms, greeting beat to 300 ms, outro hold to ~1.2 s. No content cut, no new audio. Combined runtime now 42 + 43 + 144 ≈ 229 s (~3:49) — Frame 3 remains the bulk.
+- Verified with `?seek` stills (mid-pull, vision theme); gates 177/177, typecheck clean, lint 0 errors. Nothing staged or committed.
+
+## 2026-11-03 03:54 IST (22:24 UTC) — Frame 3: voiced user turns, new words, deaf sign skit
+
+- Voiced the demo user's lines (new Cartesia `jacqueline` voice) instead of silent typewriter text: the cursor still clicks each message field, then the message appears as the voice reads it, and the orb shows listening while the user talks. Rewrote all Frame 3 dialogue to be specific and vivid ("My mornings are chaos…", "you just ate my lunch"); regenerated 13 clips, kept 8.
+- Added a deaf sign-language skit: narrator setup → detector Recording (red dot) → Reading → "Your coworker" reply card ("You just ate my lunch.", translated from ASL). Blind vignette and outro shift ~9 s later; scene runs ~108 s. Verified with `?seek` stills; gates 177/177, typecheck clean, lint 0 errors. Nothing staged or committed.
+
+## 2026-11-03 03:22 IST (21:52 UTC) — Frame 3 mock restyled to the real dashboard
+
+- Rebuilt the Frame 3 mock panel against the actual dashboard code: chat bubbles are gone (the dashboard is voice-first) — user lines now type into a `chatbox.tsx`-shaped field with a blinking caret, Atlus's words run in the real caption line (`min-h-5`, mono xs, ink-muted), and every card uses the `sidebar-panel` pattern (sage border, ◆ uppercase title).
+- Autism mood is now a real card: 1–5 scale from the mood contract + "Logged privately" note. Mute mode gained the full sign-detector flow from `dashboard-flow.tsx`: camera toggle, circular live preview, sage Sign button cycling Sign → Recording (pulsing red dot) → Reading, plus the verbatim helper copy. Blind keeps the circular preview + guard banner with the caption carrying the spoken alert. Ambient effects only (caret blink, recording pulse, orb motion) — all seek-safe.
+- No script changes (same windows, same clips); gates still 155/155, typecheck clean, lint 0 errors. Nothing staged or committed.
+
+## 2026-11-03 03:16 IST (21:46 UTC) — Demo Frame 3: Explore what Atlus can do
+
+- Built `/demo` Frame 3 (~95 s) behind the `DemoFrames` router: intro → meet (now with `onEnded`) → explore; `?frame=explore` mounts it for stills. 18 clips via `generate-audio.mjs` (gemma narrator, skylar Atlus), durations measured into `frame3-script.ts`.
+- Real `AccessBar` falls in with an ease-out-bounce (pure function of the clock, seek-compatible) and follows the active mode; new `DemoCursor` (deterministic waypoints, pill centers measured live from `[data-access-mode]`, click pulse) visits autism → mute → deaf → blind. Mock dashboard shows one vignette at a time: typed threads + cards (plan checklist, reminder, weather), mood chip, sign row, blind voice UI + camera pane + guard banner. Deaf stays honest: orb idle, card-only reply, narrator carries it. Orb takes helper colors per topic; listening beats never overlap speech.
+- Verified with `?seek` stills (bar drop, click, all four vignettes, guard, outro); gates: `bun run test` 175/175 (new `tests/frame3.test.js`, incl. capabilities-vs-access-table honesty checks), typecheck clean, lint 0 errors. Nothing staged or committed.
+
+## 2026-11-03 02:48 IST (21:18 UTC) — Demo Frame 2: Meet Atlus
+
+- Built `/demo` Frame 2 ("Meet Atlus") behind a `DemoFrames` router: Frame 1 plays first and hands off once via `onEnded`; `?frame=meet` mounts Frame 2 directly for review stills. 9 new clips via `bun scripts/generate-audio.mjs` (Cartesia `gemma` narrator for continuity, Cartesia `skylar` for Atlus — not Deepgram's Skylar), timings measured into `meet-atlus-script.ts`.
+- Frame 2 opens on a plain paper veil (no background characters — the "ignore the background characters" line is speech-only, per feedback); the site hand rig (`hands/Hand` + `parts.ts` geometry, raw transform strings like `hands/scene.ts`) enters top-right, curls, and drags the veil off to unveil the centered orb. Fixed a missing `)` that voided the hand transform (unscaled rig painted a slab at top-left); root-caused via pixel sampling + identical bboxes across progress values.
+- Orb state (listening 500 ms beats / speaking / idle) and theme colors derive from cue boundaries, never overlap; colors are the real `team-section` helper values (vision violet, calm orange, signs gold) tweened onto the orb's observed `--orb-color-*` vars (instant-set in stills modes). Orb enlarged (cap 560) with a new opt-in `particles` prop (2400 in Frame 2, default 960 elsewhere, cached per count).
+- Verified with `?seek` stills (veil, mid-pull, vision/autism/signs themes); gates: `bun run test` 155/155 (new `tests/meet-atlus.test.js`), typecheck clean, lint 0 errors. Nothing staged or committed.
+
+## 2026-11-03 01:47 IST (20:17 UTC) — Demo characters visual polish pass
+
+- Polished both `/demo` character rigs in place (flat-vector style, same palette, no pivot or timing changes): wheelchair user gained a crew collar + shirt hem, rounded elbow joint on the push arm, backrest pad + seat cushion, tire highlight arc + hub cap, shoe soles, and a finished face (ear with inner arc, brow, hair wrapping to the nape). Blind walker gained a scarf knot + tail fold, jacket collar V + pocket flap + hem shading, sleeve cuff at the cane wrist, shoe soles, and the same face treatment (ear, brow, nape; cheek blush moved onto the cheek below the glasses where it no longer hides under the ear).
+- All additions kept inside existing group bboxes where pivots are bbox-relative (head 50% 100%, arm-far top-right, legs top-left); explicit-svgOrigin pivots (push arm shoulder, torsos) and the pixel-offset cane pivot untouched — cane geometry unchanged. Component SVGs and `/tmp/opencode/svg/*.svg` kept in sync, re-rendered to `/tmp/opencode/png/`.
+- Verified with `?seek` stills (5_000 rest, 17_400 wave, 9_500 mid-approach): wave/stride/rest poses clean, details read at stage scale. Gates: `bun run test` 141/141, typecheck clean, lint 0 errors. Nothing staged or committed.
+
+## 2026-11-03 01:41 IST (20:11 UTC) — Demo intro rebuild: GSAP rigs + retimed entrance
+
+- Rebuilt both `/demo` character rigs with GSAP: wheelchair push arm re-anchored to an explicit shoulder SVG origin (sleeve trails back to a lifted rear elbow, forearm down-forward, hand ON the handrim; roll press −9°/return, idle drift ±2.5°) and recolored sleeve so it reads against the torso; blind cane-arm grip recomposed (cane under the arm, no wrist-strap hook). Far arms re-layered BEHIND the torso on both characters so resting hand dots hide and only emerge on gestures; reference SVGs in `/tmp/opencode/svg/` re-rendered to `/tmp/opencode/png/` in sync.
+- Fixed the root cause of empty live screenshots: `Number(searchParams.get("freeze"))` → `Number(null)` = 0 pinned every non-freeze URL at now=0. Param parsing now drops missing keys, and a `?seek=<ms>` stills mode poses every rig deterministically (spin/roll 0.6, idle 3.3 wheelchair / 2.9 blind, stride 0.82, talk 0.18; one-shots seek `min(elapsed, duration)`). Behaviors export `gestureElapsed`; characters take `seek`/`gestureElapsed` with dedicated seek effects. Verified mid-roll, stride extreme, wave, shrug + open mouth, facepalm, guided walk-out; no-param virtual-time stays empty in headless (rAF not pumped — known limitation, `?seek` is the review path).
+- Retimed the dead air after "Wait, wait, what?" (ends 5,940) to ~2 s: blind track now [[7_400,130],[10_400,64],…] (first visible ~8,050), wheelchair meets earlier [[10_800,26],[15_000,46],…], look window 7_200–9_200. MP3 cue times untouched (ground truth); `tests/demo-intro.test.js` updated (clean-open null at 6_999, new ~2 s entrance test, enter=9_000/held=14_000).
+- Verified: `bun run test` 141/141, typecheck clean, lint shows only the 2 pre-existing `set-state-in-effect` warnings. Nothing staged or committed.
+
+## 2026-11-03 05:50 IST (00:20 UTC) — Demo rebuilt as character intro (from scratch)
+
+- Deleted the old scripted demo (`components/demo/*`, `tests/demo-script.test.js`, `demo-video/`) and rebuilt `/demo` as a 42 s character intro: 400 ms clean open → wheelchair enters left, narrator “Hi guys, I am…” → startled brake-rock on “Wait, wait, what?” → pause → exit right → blind enters right → full 8-line exchange (curious/content/surprised narrator, calm/confident/sarcastic/resigned blind) → 500 ms beat → final line → exit left → clean background + replay.
+- Wheelchair + blind SVGs extracted verbatim to `components/characters.tsx` (header imports them, zero visual change) and polished for large-size rendering: bolder tire with handrim, thicker spokes/limbs/cane, shoe, larger hub/glasses — same design, same animation utilities.
+- Voices: 10 Cartesia MP3s in `public/demo/audio/` (`gemma` narrator, `daniel` blind, per-line emotions), played by a local-only `useIntroVoice` hook (pause/resume/restart-safe, enable-sound fallback if autoplay is blocked). No TTS services, no network beyond same-origin MP3s.
+- `?freeze=<ms>` pins the clock for stills; pause/resume/restart + Space/R kept for recording; sr-only live region carries the dialogue for AT (nothing visual added).
+- Verified: `bun run test` 135/135 (new `tests/demo-intro.test.js`: order, ≥300 ms gaps, 500 ms pre-final beat, exits land, files exist), typecheck clean, oxlint clean apart from two pre-existing-style effect warnings, freeze-frame screenshots (wheelchair entering, blind mid-scene, clean end), header unchanged. Nothing staged or committed.
+
+## 2026-11-02 22:50 IST (17:20 UTC) — Demo video step 1: audio script + folder
+
+- New `bun scripts/generate-audio.mjs "Hi guys"` (also `bun run generate:audio`): one Cartesia Sonic MP3 per call, `CARTESIA_API_KEY` when set or the public demo token otherwise (same flow as the old `generate-cartesia-voices` script). Flags: `--voice/--voice-id`, `--pace` (slow/steady/brisk shortcut), `--speed 0.6–1.5`, `--volume 0.5–2.0`, `--emotion <name>` (documented list, English only) — all per docs, all validated before the request. Defaults to `demo-video/audio/<slug>.mp3`. Verified with real clips (“Hi guys”, alarmed danger + calm lines).
+- New `demo-video/` folder (`audio/`, `frames/`, README with the frame plan: frame-01 0–30 s, frame-02 30–40 s, …). Live `/demo` untouched until frame 01 is cut.
+- Verified: `--help` exits 0, typecheck clean, `bun run test` 135/135. Nothing staged or committed.
+
+## 2026-11-02 22:38 IST (17:08 UTC) — Demo order autism → mute → deaf → blind, mute thinks first
+
+- Reordered the scenes to autism, mute, deaf, blind (intro/outro unchanged) and moved every mode-scoped event with it: messages are rescheduled into their new scene slot, captions/tokens/hive nodes/prompt/camera/double-tap timestamps follow, and the cursor steps click the next mode only when it is different (no redundant autism click on the intro).
+- Mute now shows the sign recognition first, then a 2.6 s orb “Thinking…” beat (34.4–37.0 s) before the reply at 37 s; the route card arrives during the reply. The live caption now mirrors the dashboard’s “Thinking…/Searching memory…” states.
+- The demo remains a full website surface (no outer rounded card), visual-only (no TTS/Deepgram), 2:10 runtime with the final 5 s thanks page.
+- Verified: `bun run test` 135/135, typecheck clean, oxlint clean on demo files. Nothing staged or committed.
+
+## 2026-11-02 22:09 IST (16:39 UTC) — Demo TTS removed; visual-only again
+
+- Removed the demo voice path: deleted `scripts/generate-demo-audio.mjs` (never run), deleted `use-demo-voice.ts`, dropped the Start-with-sound overlay and all `speechSynthesis` use. The demo auto-starts again.
+- `DEMO_AUDIO` remains the same sorted, voice-free cue map for future audio; no Deepgram/TTS call exists on `/demo` and no audio files were generated.
+- Kept the 2:10 runtime: 96 s script stretched over 125 s real, then the 5 s blank “Thank you for watching my demo.” page. The typed deaf chatbox prompt, double-tap consent, and all visuals are unchanged.
+- Verified: `bun run test` 135/135, typecheck clean, build includes `/demo`, no `speechSynthesis`/`fetch` references under `components/demo`.
+
+## 2026-11-02 21:32 IST (16:02 UTC) — Automated `/demo` page for recording
+
+- New isolated `/demo` route (not linked from production) plays a 96 s scripted accessibility demo: blind obstacle guidance (camera off → double-tap consent → frame 04 → haptic), autism Hive Mind + pattern card, mute sign recognition + route card, deaf live captions + alarm + typed chatbox prompt. Zero API calls, camera, model, or TTS; all visuals derive from `components/demo/script.ts`.
+- `useDemoTimeline` owns the clock; pause freezes the cursor, cards, captions, chatbox typing, hive pulse, and orb (`speed=0`), restart resets by remounting the stage. A synthetic cursor follows `data-demo-target` elements, with click ripples, rings, and a cached last position so a target that unmounts does not yank it to the center.
+- The demo mirrors the dashboard surface: mode bar, orb, plain caption, tool rows, and right-side cards; no header, conversation panel, intro grid, or camera button/preview. The deaf scene uses a dashboard-style chatbox to type “What did I miss?”, animates the sent bubble, then answers at 81 s.
+- Audio-ready: `DEMO_AUDIO` is a sorted cue list (scene starts, assistant lines, captions, prompt, haptic/alarm) with the text each clip should say. Playback now uses the browser's local speech synthesis only: a **Start demo** gate (necessary for the audio gesture) starts the clock; `useDemoVoice` gives the user, Atlas, and the meeting speaker distinct pitches/voices, pauses with the timeline, and re-arms cues on restart/seek. Deaf mode keeps Atlas silent; only the meeting speaker is voiced.
+- Runtime is now **2:10**: the 96 s script is stretched to 125 s of real playback (same script data, slower clock), followed by a 5 s blank thanks page ("Thank you for watching my demo.") at 125–130 s. The footer shows real time; `?t` seeking was removed with the `set-state-in-effect` lint.
+- Tests: `tests/demo-script.test.js` checks contiguous scenes, sorted cursor/mode/audio cues, messages inside scenes, caption non-overlap, the typed prompt timing, the 2:10/5 s thanks tail, and user/Atlas voice coverage. Verified: `bun run test` 135/135, typecheck clean, build includes `/demo`, oxlint clean on demo files. Nothing staged or committed.
+
 ## 2026-11-02 17:40 IST (12:10 UTC) — Cleanup round 2: correct sign MIME, abort semantics, docs
 
 - Fixed a real signing bug: `assertSignVideo` now returns the detected MIME and `transcribeSigningVideo` puts that exact type in the data URL, instead of always claiming `video/mp4`. A WebM upload now fails honestly with the gateway's "MP4 only" message rather than being mislabeled. The sign recorder also tries MP4 first so capable browsers send an accepted clip.
@@ -1262,16 +1457,4 @@ Per request, deleted the entire model-free CV build (`handpose/` C++ pipeline, b
 
 ## 2026-11-01 18:20 IST (12:50 UTC) — Prompt X-Ray diagnosis: spoken procedures
 
-- Applied the prompt-xray `prompt-debugger` skill (read from GitHub, not installed) to the coffee wire: model spoke a full procedure instead of cards. Diagnosis: no runtime shape enforcement, no procedure ban in the `speak` tool description, path decision duplicated in two prompt sections.
-- Smallest fix applied: one ban sentence in the `speak` tool description. Shape gate and path-decision dedupe deferred until the confirmation test (teach-me-coffee must produce cards + headline) passes or fails live.
-
-## 2026-11-01 18:45 IST (13:15 UTC) — Evidence system removed, speak redefined as summary
-
-- Removed the whole evidence apparatus the model found confusing: `evidence` args, exec ids, result stamps, citation rules A-C, the ledger module, and every prompt/example teaching them. Identical repeat calls still share one stored outcome (request-keyed run cache); tool messages carry raw results.
-- What remains of integrity is text-only and id-free: tool-call JSON as text rejected, Markdown withheld from speech, and action claims withheld when no action ran (verified live with mocked turns: fabricated search claim withheld and repaired, plain speak passes first try).
-- `speak` redefined per direction: the short summary of the full reply, never how-to/procedures, full text over ~100 words goes in a card with a compressed spoken summary. In the tool description and the Speech prompt section.
-- Honest cost: nothing now stops the model from claiming an action whose result it misreads — post-action utterances are accepted on trust plus the shape/pattern checks. If invented search claims appear, this removal is why.
-
-## 2026-11-01 19:00 IST (13:30 UTC) — AGENTS.md prompt-engineering docs rewritten
-
-- Rewrote the section to match reality: removed test-suite/json_object/evidence claims; documented the summary speak contract, 100-word rule, context-noun rule, fail-defaults, decision-point bans, round counter, fence citation rights, and mocked-turn verification. Added Vane and prompt-xray-skills to reference reading.
+- Applied the prompt-xray `prompt-debugger` skill (read from GitHub, not installed) to the coffee wire: model spoke a full procedure instead of cards. Diagnosis: no runtime shape enforcement, no procedure ban in the `speak` tool description, path decision duplicated in                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
