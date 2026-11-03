@@ -116,8 +116,8 @@ export async function POST(request: Request) {
 
         if (!input.audio && !input.transcript) {
           throw new OrbError(
-            "audio",
-            "I didn't catch any speech in that clip.",
+            "validation",
+            "No audio or transcript was provided.",
           );
         }
 
@@ -276,7 +276,7 @@ export async function POST(request: Request) {
           }),
         );
       } catch (error) {
-        const code = isOrbError(error) ? error.code : "audio";
+        const code = isOrbError(error) ? error.code : "config";
         const message = userMessageFor(error);
 
         // A disconnected client cannot receive a frame, and an abort is not a
