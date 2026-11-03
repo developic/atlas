@@ -76,3 +76,18 @@ export function joinCardMarkdown(cards: CardContent[]): string {
     .join("\n\n")
     .slice(0, MAX_CARDS * MAX_CARD_CONTENT);
 }
+
+/**
+ * Model-readable turn note for cards a result produced but the turn could
+ * not show. The six-card fold drops the overflow, so without this note the
+ * model would speak of cards that are not on screen. Empty when nothing was
+ * dropped; the caller attaches it to the round's tool message.
+ */
+export function describeCardOverflow(dropped: number): string {
+  if (!Number.isFinite(dropped) || dropped <= 0) return "";
+
+  const cards = dropped === 1 ? "1 card" : `${dropped} cards`;
+  const verb = dropped === 1 ? "was" : "were";
+
+  return `[Turn note: ${cards} from this result ${verb} not shown — a turn carries at most ${MAX_CARDS} cards. Only the first ${MAX_CARDS} are on screen: speak of those only, or group the rest into fewer cards.]`;
+}
