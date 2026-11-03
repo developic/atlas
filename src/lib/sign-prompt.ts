@@ -1,9 +1,9 @@
 /**
  * Sign transcription prompt, divided into parts.
  *
- * Pure strings only — no keys, no fetch — so both the server transcriber
- * (`lib/sign-video.ts`) and the client test page (`app/test/sign-client.tsx`)
- * import from here instead of mirroring the text. `DEFAULT_SIGN_PROMPT` is
+ * Pure strings only — no keys, no fetch — so the server transcriber
+ * (`lib/sign-video.ts`) imports from here instead of mirroring the text.
+ * `DEFAULT_SIGN_PROMPT` is
  * the parts joined in order; the route sends the whole thing every turn, so
  * keep the total under SIGN_PROMPT_MAX_CHARS (enforced in `sign-video.ts`).
  */
