@@ -15,6 +15,9 @@ lint, typecheck, and this suite; model-dependent checks are live scripts instead
 | `vision-guard.test.js` | Blind-mode obstacle warnings: frame data-URL bounds (JPEG/PNG only), MP4-only clip validation, strict verdict shape (hazard/urgency/message), silent no-hazard, unusable hazard-without-instruction refused, and deterministic message caps |
 | `frame.test.js` | Camera `frame` tool: registered in the tool set, camera-off fails with the permission instruction, missing status treated as off, camera-on authorizes the video capture and forbids describing it before the description arrives |
 | `frame-video.test.js` | Camera clip describer: MP4-only bounded clip validation, strict `{description, clear}` shape, trimmed/capped descriptions, empty descriptions refused |
+| `vad-audio.test.js` | Server VAD wire format: 48 k→16 k resampling, int16 clamping, seq-prefixed window round-trip, strict boundary-event parsing, reset control shape |
+| `vad-session.test.js` | Server VAD decision state: silence never fires, onset seq, between-threshold hold, non-finite skip, lone-window misfire, sustained-run end seqs, exact minimum-voiced boundary, pause survival inside redemption, reset drops partials, pad cannot inflate short runs |
+| `card-overflow.test.js` | `describeCardOverflow`: empty on zero/negative drops, singular/plural naming, six-card cap named in the note |
 
 ## Live checks (not CI)
 

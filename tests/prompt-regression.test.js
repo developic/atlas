@@ -74,6 +74,15 @@ describe("rules the evaluation depends on", () => {
   test("speech claims are runtime-honest", () => {
     expect(prompt).toContain("Claims match what actually ran");
     expect(prompt).toContain("what you know from memory is labelled as memory");
+    expect(prompt).toContain("Dictated words are not your claims");
+  });
+
+  test("owed cards are created before words about them", () => {
+    expect(prompt).toContain("CALL create NOW");
+  });
+
+  test("the six-card cap wins over per-card requests", () => {
+    expect(prompt).toContain("The six-card turn cap wins over an explicit one-step-per-card request");
   });
 
   test("history card Markdown is not a format to imitate", () => {

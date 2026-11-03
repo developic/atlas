@@ -145,18 +145,18 @@ describe("mode capabilities — delivery is decided by the app", () => {
     expect(capabilitiesFor(null).guard).toBe(false);
   });
 
-  test("deaf accepts no audio turns", () => {
-    expect(capabilitiesFor("deaf").microphone).toBe(false);
+  test("mute accepts no audio turns; every other mode does", () => {
+    expect(capabilitiesFor("mute").microphone).toBe(false);
     expect(capabilitiesFor("autism").microphone).toBe(true);
-    expect(capabilitiesFor("mute").microphone).toBe(true);
+    expect(capabilitiesFor("deaf").microphone).toBe(true);
     expect(capabilitiesFor("blind").microphone).toBe(true);
   });
 
-  test("voice policy: off for deaf, optional for mute, on otherwise", () => {
+  test("voice policy: off for deaf, on for mute and the rest", () => {
     expect(isSpeechEnabled("deaf")).toBe(false);
     expect(isSpeechEnabled("deaf", true)).toBe(false);
 
-    expect(isSpeechEnabled("mute")).toBe(false);
+    expect(isSpeechEnabled("mute")).toBe(true);
     expect(isSpeechEnabled("mute", true)).toBe(true);
 
     expect(isSpeechEnabled("autism")).toBe(true);
