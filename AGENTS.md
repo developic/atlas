@@ -72,7 +72,6 @@ src/app/                App Router
   api/orb/guard/route.ts        blind obstacle warnings: clip or frame → spoken hazard verdict
   api/sign-test/route.ts        test-only: whole clips vs the video model directly
   api/voice-preview/route.ts    /start personalized voice preview (Deepgram MP3)
-  test/                   manual consoles: orb-client, sign-client, hand-client, test-console
   globals.css             tokens (sand/ink/sage), shadcn surface, dark mode
   layout.tsx              root: fonts, theme bootstrap script (no header — 404 stays full-bleed)
 
@@ -125,7 +124,8 @@ src/components/
                           Ctrl+K command menu, access mode bar (access-bar),
                           camera gestures (use-camera-gestures), frame capture
                           (use-frame-capture), blind obstacle guard (use-vision-guard)
-  layout/                 header; responsive shims (adaptive-card/container)
+  layout/                 header (wheelchair + blind SVGs live in components/characters.tsx),
+                          responsive shims (adaptive-card/container)
   sections/               marketing scenes: hands/ (scroll-driven CTA press scene), hands-section, team-section
   start/                  onboarding wizard + voice/pace previews (use-voice-preview)
   ui/                     shadcn primitives, Markdown renderer, theme toggle, 404 eye scene
