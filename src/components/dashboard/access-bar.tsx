@@ -70,6 +70,7 @@ export function AccessBar({
               type="button"
               onClick={() => onChange(id)}
               aria-pressed={active}
+              data-access-mode={id}
               aria-label={`${meta.label}: ${meta.hint}`}
               title={`${meta.label} — ${meta.hint}`}
               className={cn(
@@ -89,10 +90,10 @@ export function AccessBar({
         <p aria-live="polite" className="text-center font-mono text-[11px] text-ink-muted">
           {MODE_META[mode].hint}
         </p>
-        {mode === "mute" ? (
+        {mode === "mute" && onVoiceRepliesChange ? (
           <button
             type="button"
-            onClick={() => onVoiceRepliesChange?.(!voiceReplies)}
+            onClick={() => onVoiceRepliesChange(!voiceReplies)}
             aria-pressed={voiceReplies}
             className={cn(
               "inline-flex min-h-8 items-center gap-1 rounded-full border px-2.5 font-mono text-[11px] transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
