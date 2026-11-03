@@ -3,7 +3,6 @@ import {
   MOOD_WINDOW_DAYS_DEFAULT,
   MOOD_WINDOW_DAYS_MAX,
   analyzeMood,
-  clampWindowDays,
   parseMoodLog,
   parseMoodSnapshot,
   renderMoodReport,
@@ -199,12 +198,12 @@ function parseDays(
 
   const value = Number(raw);
 
-  if (!Number.isFinite(value) || value < 1 || value > MOOD_WINDOW_DAYS_MAX) {
+  if (!Number.isInteger(value) || value < 1 || value > MOOD_WINDOW_DAYS_MAX) {
     return {
       ok: false,
-      reason: `Failed: days must be a number from 1 to ${MOOD_WINDOW_DAYS_MAX}.`,
+      reason: `Failed: days must be a whole number from 1 to ${MOOD_WINDOW_DAYS_MAX}.`,
     };
   }
 
-  return { ok: true, value: clampWindowDays(value) };
+  return { ok: true, value };
 }
