@@ -86,6 +86,26 @@ const buildSphere = (count: number): Sphere => {
 
 const SPHERE = buildSphere(PARTICLE_COUNT);
 
+/** Per-count caches so a denser hero orb never rebuilds every frame. */
+const sphereCache = new Map<number, Sphere>([[PARTICLE_COUNT, SPHERE]]);
+const rankCache = new Map<number, Uint16Array>([[PARTICLE_COUNT, SEARCH_RANKS]]);
+
+const sphereFor = (count: number): Sphere => {
+  const hit = sphereCache.get(count);
+  if (hit) return hit;
+  const built = buildSphere(count);
+  sphereCache.set(count, built);
+  return built;
+};
+
+const ranksFor = (count: number): Uint16Array => {
+  const hit = rankCache.get(count);
+  if (hit) return hit;
+  const built = createSearchRanks(count);
+  rankCache.set(count, built);
+  return built;
+};
+
 const DEFAULT_COLOR_FROM = '#f0abfc';
 const DEFAULT_COLOR_TO = '#818cf8';
 
@@ -95,6 +115,7 @@ export const ParticlesOrb = ({
   speed = 1,
   colorFrom,
   colorTo,
+  particles = PARTICLE_COUNT,
   levelRef,
   progress = 0.5,
   label = 'Assistant orb',
@@ -180,7 +201,9 @@ export const ParticlesOrb = ({
     const dotScale = 0.55 + 0.45 * smallness;
     const alphaScale = smallness * smallness;
     const baseRadius = center * 0.7;
-    const n = PARTICLE_COUNT;
+    const n = particles;
+    const sphere = sphereFor(n);
+    const ranks = ranksFor(n);
     const px = new Float32Array(n);
     const py = new Float32Array(n);
     const pr = new Float32Array(n);
@@ -310,11 +333,11 @@ export const ParticlesOrb = ({
       counts.fill(0);
 
       for (let i = 0; i < n; i += 1) {
-        const sx = SPHERE.x[i];
-        const sy = SPHERE.y[i];
-        const sz = SPHERE.z[i];
-        const seed = SPHERE.seed[i];
-        const ringFrac = SPHERE.ringFrac[i];
+        const sx = sphere.x[i];
+        const sy = sphere.y[i];
+        const sz = sphere.z[i];
+        const seed = sphere.seed[i];
+        const ringFrac = sphere.ringFrac[i];
 
         const twist = swirlAmp > 0.002 ? ay + swirlAmp * Math.sin(sy * 2.4 + t * 1.6) : ay;
         const cy = Math.cos(twist);
@@ -328,7 +351,7 @@ export const ParticlesOrb = ({
         const perspective = 0.62 + depth * 0.5;
 
         const highlight = searchFx
-          ? searchHighlight(SEARCH_RANKS[i], searchFx)
+          ? searchHighlight(ranks[i], searchFx)
           : 0;
 
         // The scan band is a horizontal slice in view space. Dots inside it
@@ -364,7 +387,7 @@ export const ParticlesOrb = ({
         let dot = 0.55 + Math.pow(depth, 1.5) * 2;
 
         if (ringW > 0.004) {
-          const tone = SPHERE.tone[i];
+          const tone = sphere.tone[i];
           const ringAngle = (i / n) * TWO_PI + motion.ringPhase + 0.05 * Math.sin(t * 1.3 + seed);
           const ringR =
             center * (0.58 + 0.13 * ringFrac) * (1 + 0.05 * Math.sin(t + seed * 1.7)) * ringBreath;
@@ -409,8 +432,8 @@ export const ParticlesOrb = ({
         const ab = Math.min(ALPHA_BUCKETS - 1, Math.floor(alpha * ALPHA_BUCKETS));
         const toneBucket =
           highlight > 0
-            ? searchToneBucket(SPHERE.toneBucket[i], highlight, TONE_BUCKETS)
-            : SPHERE.toneBucket[i];
+            ? searchToneBucket(sphere.toneBucket[i], highlight, TONE_BUCKETS)
+            : sphere.toneBucket[i];
         const b = toneBucket * ALPHA_BUCKETS + ab;
         bucketOf[i] = b;
         counts[b] += 1;
@@ -482,7 +505,7 @@ export const ParticlesOrb = ({
       window.removeEventListener('pointermove', onPointerMove);
       drawRef.current = null;
     };
-  }, [size, frameRef]);
+  }, [size, particles, frameRef]);
 
   return (
     <div
