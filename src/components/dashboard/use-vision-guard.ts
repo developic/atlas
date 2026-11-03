@@ -18,6 +18,9 @@ import type { GuardResult, GuardUrgency } from "@/lib/vision-guard";
  * something is in the path, and speaks the answer. A fresh clip is recorded
  * for every check — nothing is reused — and the loop pauses while a turn is
  * running, while the tab is hidden, and while a warning is being spoken.
+ * After a warning is spoken, the carried previous-warning context is dropped
+ * once, so the next verdict is judged purely on fresh post-warning movement;
+ * repeat suppression resumes from the verdict after that.
  *
  * Browsers without MediaRecorder fall back to a single fresh frame per check.
  */
@@ -109,6 +112,13 @@ export function useVisionGuard({
     let lastMessage = "";
     let lastSpokenAt = 0;
     let errorWait = 1_500;
+    /**
+     * Set after a warning is spoken. The next check sends no previous-warning
+     * context, so the verdict comes purely from fresh post-warning movement.
+     * Cleared on use; `lastMessage` itself is kept, so repeat suppression for
+     * a still-present obstacle resumes on the verdict after that.
+     */
+    let dropPreviousOnce = false;
     const controller = new AbortController();
 
     const wait = (ms: number) =>
@@ -164,6 +174,11 @@ export function useVisionGuard({
         const video = getVideo();
         let result: GuardResult | null = null;
 
+        // A spoken warning discards the old context once: this check is
+        // judged on fresh movement alone, not on what was warned before.
+        const previous = dropPreviousOnce ? "" : lastMessage;
+        dropPreviousOnce = false;
+
         if (!videoBroken && clipType && hasVideoTrack(stream)) {
           const clip = await recordCameraClip(
             stream as MediaStream,
@@ -176,7 +191,7 @@ export function useVisionGuard({
 
           if (clip) {
             try {
-              result = await postClip(clip, lastMessage);
+              result = await postClip(clip, previous);
             } catch {
               result = null;
             }
@@ -192,7 +207,7 @@ export function useVisionGuard({
 
           if (frame) {
             try {
-              result = await postFrame(frame, lastMessage);
+              result = await postFrame(frame, previous);
             } catch {
               result = null;
             }
@@ -225,6 +240,9 @@ export function useVisionGuard({
             lastSpokenAt = now;
             setLastWarning(result.message);
             await speakWarning(result.message, result.urgency);
+            // The user moves on this warning: drop the old context once so
+            // the next check reads fresh movement, not the warning just given.
+            dropPreviousOnce = true;
           } else if (!same) {
             lastMessage = result.message;
             setLastWarning(result.message);
