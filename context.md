@@ -1,5 +1,44 @@
 # Project Context
 
+## 2026-11-04 14:12 IST (08:42 UTC) — Onboarding drops the disability question
+
+- Decision: `/start` is now name → age → pace → review (4 steps). Removed the disability catalog, the `DisabilityStep`, the `Onboarding`/`UserProfile` field, the profile prompt's access-need line, and the eval harness's profile pick. The dashboard's access-mode bar is the single source of adaptation; the prompt already receives mode instructions.
+- Reminder channel: the scheduler already preferred `deps.mode` (blind → voice, everyone else → beep). With onboarding gone, `defaultGetMode` uses only the stored `reminder-mode` override, defaulting to beep; `announceModeFor` now takes just the override. No behavior change when the dashboard passes a mode.
+- Tradeoff: a user no longer gets a one-line access-need hint in the cached profile before choosing a mode; the dashboard starts in autism and the mode bar is explicit. Old stored onboarding records with `disability` are ignored by the parser.
+- Verification: `bun run test` 202/0 across 19 files, `bun run typecheck` clean, lint warnings only (pre-existing start-step a11y warnings).
+
+## 2026-11-04 13:36 IST (08:06 UTC) — Hosted search endpoint is the code default
+
+- Decision: hardcoded the deployed search endpoint as `DEFAULT_SEARCH_URL` in `src/lib/tools/websearch.ts`; `SEARCH_API_URL` is now an optional override. The app works out of the box without an env entry, and the URL stays out of the README, `.env.example`, and `.env`.
+- Tradeoff: the endpoint is public in source; the provider key remains only in the Worker secret. A blank or missing override uses the default; an invalid explicit override still fails with a typed `config` error instead of silently falling back.
+- Verification: `bun install --frozen-lockfile` clean (also removed the duplicate `openai` key from `bun.lock`), `bun run test` 202/0 across 19 files, `bun run typecheck` clean, `bun run build` passes, VAD `/healthz` answers ok, and `/`, `/start`, `/dashboard` return 200. Live `websearch("latest Bun version")` through the default endpoint returned 8 hits with highlights.
+
+## 2026-11-04 11:01 IST (05:31 UTC) — App search now resolves one server-side endpoint
+
+- Decision: `src/lib/tools/websearch.ts` now reads `SEARCH_API_URL` only. The app no longer knows the search provider or holds a provider key: removed the app-side provider key from the app code, `.env.example`, the local `.env`, the main README key table, the Docker example, and `scripts/eval/README.md`; the main README describes a generic server-side search endpoint and no longer documents the Worker. The search Worker keeps its own provider secret internally — it is isolated under `worker/` and is the only place the provider key name remains.
+- Tradeoff: there is no direct-provider fallback. Without `SEARCH_API_URL`, search returns a typed `config` failure and the model answers without search. The deployed URL lives only in the gitignored `.env`; tracked files contain no URL. `tests/search-target.test.js` now covers only the configured endpoint, including local `http://`, missing/blank values, and non-http rejection.
+- Verification: `bun run test` 201/0 across 19 files, `bun run typecheck` clean. The Worker tests still cover its internal secret path; the app tests no longer reference a provider key. Live check: `websearch("latest Bun version")` through the deployed `SEARCH_API_URL` returned 8 hits with highlights, and the Worker `/health` answered `{"status":"ok"}`.
+
+## 2026-11-04 10:55 IST (05:25 UTC) — Search Worker deploy cleanup
+
+- Removed the duplicate `openai` dependency key that Wrangler reported while bundling the Worker, and set `preview_urls = false` in `worker/wrangler.toml` so only the production URL is exposed. The Worker contract, code, and response shape are unchanged.
+- Verified: `bun run test` 196/0, `bun run typecheck` clean. The preview-URL setting takes effect on the next `npx wrangler deploy`; the secret already set with `wrangler secret put` does not need to be re-entered.
+
+## 2026-11-04 10:40 IST (05:10 UTC) — Cloudflare search Worker (Exa proxy)
+
+- Decision: new `worker/` subproject exposes `POST /search` and `GET /search?query=...&limit=...` and proxies to Exa's official `/search` API with `contents: { highlights: true }`. `EXA_API_KEY` is read only from the Worker secret `env.EXA_API_KEY`; the response keeps the `{ results: [{ title?, url, publishedDate?, highlights[] }] }` shape Atlas's `websearch.ts` already parses, so the backend's result handling does not change.
+- Limits/errors: default 8, max 20 (`limit` or `numResults`; JSON or query string), query capped at 400 chars, body capped at 16 KB. Exa 429 passes through `Retry-After`; 401/403, 5xx, network, and invalid upstream JSON map to 502 with safe codes; a 15 s timeout maps to 504; caller aborts map to 499. Upstream bodies and the key never enter an error response.
+- Setup: `cd worker && npx wrangler secret put EXA_API_KEY`; local `.dev.vars` is gitignored and `.dev.vars.example` is empty. `wrangler.toml` contains no key. The Worker is server-to-server; the README recommends Cloudflare Access/WAF if it is exposed publicly.
+- Tradeoff: the Worker mirrors Exa's response shape rather than inventing an Atlas-specific one; the backend keeps its direct-Exa path, so the Worker is opt-in and no Atlas code changed. A future URL swap is the only integration step.
+- Verification: `bun run test` 196/0 (new `tests/search-worker.test.js`: validation, Exa request shape, normalization/caps, 429/401/5xx/network/timeout/abort mapping, key redaction), `bun run typecheck` clean, `bun run lint` no worker findings. Wrangler dry-run could not complete because the `npx wrangler` download exceeded the command timeout; the TOML/entry was reviewed manually and the Worker logic is exercised through the offline suite.
+
+## 2026-11-04 10:24 IST (04:54 UTC) — One-time dashboard guided tour
+
+- Decision: the first `/dashboard` visit (after hydration) opens a spotlight tour over the real controls: access modes, orb tap start/stop, blind-mode double tap (camera + obstacle warnings), camera/signing, chat field, cards, threads, Ctrl+K, and a finish card. Each step highlights the live element with a four-panel cutout, so the user can try the control while the card explains it. Steps are capability-filtered — blind mode skips the chatbox/card steps — and the double-tap hint only invites the gesture where `guard` is active.
+- Persistence: `lib/tour.ts` stores a versioned `dashboard-tour` pref through the existing degrade-not-throw prefs layer; finish, skip, or Escape marks the current `TOUR_VERSION` complete, so the tour runs once per browser. Ctrl+K gained **Replay tutorial**, which reopens it without changing the marker. If IndexedDB is unavailable the marker cannot persist and the tour shows again — the same degradation rule as every other pref.
+- Interaction/accessibility: the card is a non-modal dialog with arrow-key navigation and Escape; focus moves to each step and returns to the previous element on close. The cutout is deliberately click-through (the page is not inert), because trying the gesture is the point. Tradeoff: a mode switch mid-tour re-flows the step list (the index clamps to the new last step), and a user who skips accidentally must replay from Ctrl+K. Reduced motion keeps the card still and target scrolling instant.
+- Verification: `bun run test` 180/0 (new `tests/tour.test.js` covers the version marker and card placement), `bun run typecheck` clean, `bun run lint` no errors on touched files (two expected jsx-a11y role warnings, matching the existing progress/dialog surfaces). Manual browser check still needed for spotlight geometry on real mobile/desktop viewports.
+
 ## 2026-11-04 09:41 IST (04:11 UTC) — Judge-facing repo made complete: tests un-ignored, README rewritten, log guide added
 
 - The public repo is a judging surface: `.gitignore` had `/tests/` under "# testing", which silently excluded every test file added since (five files incl. the Meta provider mocks) from version control while `README`+CI document `bun run test`. Removed the line; `/coverage` remains ignored. The five now-untracked test files need a commit from the owner to actually ship.

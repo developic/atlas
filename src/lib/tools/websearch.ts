@@ -1,45 +1,75 @@
 /**
- * Server-only Exa web search and its tool contract.
+ * Server-only web search and its tool contract.
  *
- * Follows Exa's recommended /search request: query + auto + highlights only.
- * Never import this module from a client component: it reads EXA_API_KEY.
+ * The endpoint comes from `SEARCH_API_URL`. The search service owns its own
+ * provider credentials, so this app never reads or sends them. Never import
+ * this module from a client component.
  */
 import { OrbError } from "../orb-errors";
 import { CITATION_INSTRUCTION, type OrbTool, type ToolOutcome } from "./types";
 
-const EXA_URL = "https://api.exa.ai/search";
-const EXA_TIMEOUT_MS = 15_000;
+const SEARCH_TIMEOUT_MS = 15_000;
 const HIGHLIGHT_CHARS = 600;
 const MAX_RESULTS = 8;
 const USER_AGENT = "atlas/0.1.0";
 
+/** Hosted search endpoint used when `SEARCH_API_URL` is not set. */
+export const DEFAULT_SEARCH_URL =
+  "https://atlas-search.produnction.workers.dev/search";
+
 export type SearchHit = {
-  /** Exa does not always return a title; the UI falls back to the hostname. */
+  /** The provider does not always return a title; the UI falls back to the hostname. */
   title?: string;
   url: string;
   publishedDate?: string;
   highlights: string[];
 };
 
-type ExaResult = {
+export type SearchTarget = {
+  url: string;
+};
+
+type ProviderResult = {
   title?: string | null;
   url?: string | null;
   publishedDate?: string | null;
   highlights?: string[] | null;
 };
 
-type ExaResponse = {
-  results?: ExaResult[] | null;
+type ProviderResponse = {
+  results?: ProviderResult[] | null;
 };
 
-function getApiKey(): string {
-  const key = process.env.EXA_API_KEY?.trim();
+function parseHttpUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
 
-  if (!key) {
-    throw new OrbError("config", "EXA_API_KEY is not configured. Add it to .env.");
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.toString()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve the search endpoint; the hosted default wins unless overridden. */
+export function resolveSearchTarget(
+  env: Record<string, string | undefined>,
+): SearchTarget {
+  const value = env.SEARCH_API_URL?.trim();
+
+  if (!value) return { url: DEFAULT_SEARCH_URL };
+
+  const url = parseHttpUrl(value);
+
+  if (!url) {
+    throw new OrbError(
+      "config",
+      "SEARCH_API_URL must be a valid http(s) URL.",
+    );
   }
 
-  return key;
+  return { url };
 }
 
 export async function websearch(
@@ -52,17 +82,16 @@ export async function websearch(
     throw new OrbError("validation", "The assistant asked for an empty web search.");
   }
 
-  const key = getApiKey();
-  const timeout = AbortSignal.timeout(EXA_TIMEOUT_MS);
+  const target = resolveSearchTarget(process.env);
+  const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
   const bounded = signal ? AbortSignal.any([signal, timeout]) : timeout;
   let response: Response;
 
   try {
-    response = await fetch(EXA_URL, {
+    response = await fetch(target.url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": key,
         "User-Agent": USER_AGENT,
       },
       body: JSON.stringify({
@@ -88,20 +117,20 @@ export async function websearch(
 
     throw new OrbError(
       "fetch_failed",
-      `Exa search failed (${response.status}): ${detail.slice(0, 160)}`,
+      `Search failed (${response.status}): ${detail.slice(0, 160)}`,
     );
   }
 
-  const payload = (await response.json()) as ExaResponse;
+  const payload = (await response.json()) as ProviderResponse;
 
   return formatResults(payload.results ?? []);
 }
 
 /** Keep only usable hits and compact them for the model's context. */
-export function formatResults(results: ExaResult[]): SearchHit[] {
+export function formatResults(results: ProviderResult[]): SearchHit[] {
   return results
     .filter(
-      (item): item is ExaResult & { url: string } =>
+      (item): item is ProviderResult & { url: string } =>
         typeof item?.url === "string" && item.url.length > 0,
     )
     .slice(0, MAX_RESULTS)
@@ -237,7 +266,7 @@ export async function runWebsearch(
 
     return { ok: true, result: { content: formatSearchResults(query, hits), sources: hits.map((hit) => ({ url: hit.url, ...(hit.title ? { title: hit.title } : {}) })) }};
   } catch (error) {
-    console.error("Exa web search failed", error);
+    console.error("Web search failed", error);
 
     // ok:false so the model may say the search failed, but can never present
     // this run as a successful result.

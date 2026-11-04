@@ -20,6 +20,9 @@ lint, typecheck, and this suite; model-dependent checks are live scripts instead
 | `vad-audio.test.js` | Server VAD wire format: 48 k→16 k resampling, int16 clamping, seq-prefixed window round-trip, strict boundary-event parsing, reset control shape |
 | `vad-session.test.js` | Server VAD decision state: silence never fires, onset seq, between-threshold hold, non-finite skip, lone-window misfire, sustained-run end seqs, exact minimum-voiced boundary, pause survival inside redemption, reset drops partials, pad cannot inflate short runs |
 | `card-overflow.test.js` | `describeCardOverflow`: empty on zero/negative drops, singular/plural naming, six-card cap named in the note |
+| `tour.test.js` | Dashboard tour: the one-time marker only accepts the current version, and card placement prefers below/above/side, clamps to the viewport, and falls back to the roomier edge for tall targets |
+| `search-worker.test.js` | Search proxy: query/limit validation, provider request shape (secret header, `numResults`, highlights), result normalization and caps, rate-limit pass-through, upstream/network/timeout/abort mapping, and no key leakage |
+| `search-target.test.js` | Search target selection: built-in hosted default, blank/missing override fallback, valid http(s) override, local http, trimming, and typed rejection of non-http overrides |
 | `sample-moods.test.js` | Demo mood data: fourteen labeled entries pass store validation with unique sample ids and `[Sample]` notes, the deterministic log rebuilds identically, clearing removes only sample ids, and the analyst + mood tool read a recovering trend from them |
 
 ## Live checks (not CI)

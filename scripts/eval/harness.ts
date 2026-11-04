@@ -36,7 +36,7 @@ export type TurnSpec = { user: string; note?: string };
 export type ScenarioSpec = {
   id: string;
   goal: string;
-  profile?: Pick<UserProfile, "name" | "ageRange" | "disability">;
+  profile?: Pick<UserProfile, "name" | "ageRange">;
   turns: TurnSpec[];
 };
 

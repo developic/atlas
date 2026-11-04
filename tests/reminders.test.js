@@ -241,17 +241,11 @@ describe("snapshot — unknown data rejected, never coerced", () => {
   });
 });
 
-describe("announce channel — voice for blind, beep for the rest", () => {
-  test("blind hears the topic; others get the beep", () => {
-    expect(announceModeFor("blind")).toBe("voice");
-    expect(announceModeFor("deaf")).toBe("beep");
-    expect(announceModeFor("autism")).toBe("beep");
-    expect(announceModeFor(null)).toBe("beep");
-  });
-
-  test("a stored override wins", () => {
-    expect(announceModeFor("blind", "beep")).toBe("beep");
-    expect(announceModeFor(null, "voice")).toBe("voice");
+describe("announce channel — stored override, beep by default", () => {
+  test("beep is the default; a stored override wins", () => {
+    expect(announceModeFor()).toBe("beep");
+    expect(announceModeFor("voice")).toBe("voice");
+    expect(announceModeFor("beep")).toBe("beep");
   });
 
   test("the topic line is the title, nothing else", () => {
@@ -314,6 +308,16 @@ describe("runReminderTick — notify now, speak only when idle", () => {
     const second = await runReminderTick(idleDeps, queue);
     expect(second.spoken).toEqual(["Reminder: Take the medicine"]);
     expect(queue).toHaveLength(0);
+  });
+
+  test("the selected access mode wins over the stored override", async () => {
+    const { deps } = fakes({
+      mode: "blind",
+      getMode: async () => "beep",
+    });
+    const { spoken } = await runReminderTick(deps, []);
+
+    expect(spoken).toEqual(["Reminder: Take the medicine"]);
   });
 
   test("a daily due reminder reschedules instead of completing", async () => {

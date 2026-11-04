@@ -4,10 +4,8 @@ import { Check, Square, Volume2 } from "lucide-react";
 
 import {
  AGE_RANGES,
- DISABILITIES,
  PACES,
  type AgeRange,
- type Disability,
  type Pace,
  type PaceId,
  type Step,
@@ -275,80 +273,8 @@ export function PaceStep({
  );
 }
 
-
-type DisabilityStepProps = BaseStepProps & {
- disability: Disability | null;
- onSelect: (id: Disability) => void;
- onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-};
-
-export function DisabilityStep({
- headingRef,
- disability,
- onSelect,
- onSubmit,
- onBack,
-}: DisabilityStepProps) {
- return (
- <form onSubmit={onSubmit} noValidate>
- <StepHeading headingRef={headingRef}>
- What fits you best?
- </StepHeading>
- <StepLede>
- Pick what fits best. Each choice shows the helper it unlocks.
- </StepLede>
- <p className="mt-2 text-sm text-ink-muted">
- Tip: use arrow keys to move, then Continue.
- </p>
-
- <fieldset className="mt-6">
- <legend className="sr-only">Your disability</legend>
- <div className="grid gap-2">
- {DISABILITIES.map((option) => (
- <label
- key={option.value}
- className="relative cursor-pointer"
- >
- <input
- type="radio"
- name="disability"
- value={option.value}
- required
- checked={disability === option.value}
- onChange={() => onSelect(option.value)}
- className="peer sr-only"
- />
- <span
- className={cn(
- "flex min-h-12 items-center gap-3 rounded-2xl border border-line bg-paper px-4 has-checked:border-sage-text has-checked:bg-sage-wash/60",
- OPTION_MOTION_CLASS,
- )}
- >
- <span className="flex-1 text-base text-ink">
- {option.label}
- </span>
- <span
- aria-hidden="true"
- className="shrink-0 rounded-full bg-sand px-3 py-1 text-xs font-bold text-ink-muted"
- >
- → {option.helper}
- </span>
- </span>
- </label>
- ))}
- </div>
- </fieldset>
-
- <StepActions onBack={onBack}>
- <NextButton disabled={!disability} />
- </StepActions>
- </form>
- );
-}
-
 type DoneStepProps = BaseStepProps & {
  trimmedName: string;
- disabilityLabel: string | undefined;
  ageLabel: string | undefined;
  selectedPace: Pace;
  speakingId: string | null;
@@ -360,7 +286,6 @@ type DoneStepProps = BaseStepProps & {
 export function DoneStep({
  headingRef,
  trimmedName,
- disabilityLabel,
  ageLabel,
  selectedPace,
  speakingId,
@@ -420,11 +345,6 @@ export function DoneStep({
  <ReviewRow label="Pace">
  <span>{selectedPace.label}</span>
  <ReviewChange onClick={() => onEdit("pace")} />
- </ReviewRow>
-
- <ReviewRow label="Access">
- <span>{disabilityLabel ?? "Not set"}</span>
- <ReviewChange onClick={() => onEdit("disability")} />
  </ReviewRow>
  </dl>
  </div>

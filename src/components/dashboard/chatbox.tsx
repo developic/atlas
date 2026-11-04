@@ -189,6 +189,7 @@ export function Chatbox({
 
   return (
     <div
+      data-tour="chatbox"
       className="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex justify-center pb-[env(safe-area-inset-bottom)]"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}

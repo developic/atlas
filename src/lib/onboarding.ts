@@ -4,15 +4,13 @@
  * `/start` validates the finished answer set and saves it here, so later
  * surfaces can pick it up from one storage key. Each value is checked against
  * the catalog that owns it — a hand-edited or stale entry can never hand a
- * dead voice ID, pace, or disability to a later feature.
+ * dead pace to a later feature.
  */
 
 import {
   AGE_RANGES,
-  DISABILITIES,
   PACES,
   type AgeRange,
-  type Disability,
   type PaceId,
 } from "@/components/start/start-data";
 import { dbGetPref, dbSetPref } from "@/lib/db/prefs";
@@ -28,11 +26,9 @@ export type Onboarding = {
   name: string;
   ageRange: AgeRange | null;
   pace: PaceId;
-  disability: Disability | null;
 };
 const AGE_VALUES = AGE_RANGES.map((range) => range.value);
 const PACE_IDS = PACES.map((pace) => pace.id);
-const DISABILITY_VALUES = DISABILITIES.map((item) => item.value);
 
 function isOneOf<T extends string>(
   values: readonly T[],
@@ -54,15 +50,11 @@ function parseOnboarding(value: unknown): Onboarding | null {
   if (typeof value !== "object" || value === null) return null;
 
   const record = value as Record<string, unknown>;
-  const disability = isOneOf(DISABILITY_VALUES, record.disability)
-    ? record.disability
-    : null;
 
   return {
     name: cleanName(record.name),
     ageRange: isOneOf(AGE_VALUES, record.ageRange) ? record.ageRange : null,
     pace: isOneOf(PACE_IDS, record.pace) ? record.pace : DEFAULT_PACE,
-    disability,
   };
 }
 
@@ -92,7 +84,6 @@ export async function loadOnboarding(): Promise<Onboarding | null> {
 export type UserProfile = {
   name: string;
   ageRange: AgeRange | null;
-  disability: Disability | null;
 };
 
 export function parseProfile(value: unknown): UserProfile | undefined {
@@ -100,5 +91,5 @@ export function parseProfile(value: unknown): UserProfile | undefined {
 
   if (!parsed || !parsed.name) return undefined;
 
-  return { name: parsed.name, ageRange: parsed.ageRange, disability: parsed.disability };
+  return { name: parsed.name, ageRange: parsed.ageRange };
 }

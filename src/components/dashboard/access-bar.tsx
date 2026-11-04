@@ -52,6 +52,7 @@ export function AccessBar({
       <div
         role="toolbar"
         aria-label="Access modes"
+        data-tour="access-bar"
         className="flex max-w-full items-center gap-1 overflow-x-auto rounded-full border border-line/70 bg-paper/70 px-1.5 py-1 backdrop-blur"
       >
         {ACCESS_MODES.map((id) => {

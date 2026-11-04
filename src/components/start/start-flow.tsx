@@ -6,20 +6,18 @@ import Link from "next/link";
 import {
  AGE_RANGES,
  PACES,
+ STEP_COUNT,
  STEP_INDEX,
- DISABILITIES,
  type AgeRange,
  type PaceId,
  type Step,
  type StepDirection,
- type Disability,
 } from "@/components/start/start-data";
 import {
  AgeStep,
  DoneStep,
  NameStep,
  PaceStep,
- DisabilityStep,
 } from "@/components/start/start-steps";
 import { useVoicePreview } from "@/components/start/use-voice-preview";
 import { saveOnboarding } from "@/lib/onboarding";
@@ -32,7 +30,6 @@ export function StartFlow() {
  const [name, setName] = useState("");
  const [ageRange, setAgeRange] = useState<AgeRange | null>(null);
  const [paceId, setPaceId] = useState<PaceId>("steady");
- const [disability, setDisability] = useState<Disability | null>(null);
  const headingRef = useRef<HTMLHeadingElement>(null);
  const mounted = useRef(false);
  const { supported, speakingId, play, playName, stop } =
@@ -44,14 +41,12 @@ const STEP_NAMES: Record<Step, string> = {
  name: "Your name",
  age: "Your age",
  pace: "Speaking pace",
- disability: "Your disability",
  done: "Review",
 };
 
  const trimmedName = name.trim();
  const ageLabel = AGE_RANGES.find((range) => range.value === ageRange)?.label;
  const selectedPace = PACES.find((pace) => pace.id === paceId) ?? PACES[1];
- const disabilityLabel = DISABILITIES.find((item) => item.value === disability)?.label;
 
  // Announce the new step to keyboard and screen-reader users without
  // yanking focus on first paint (which would pop the mobile keyboard).
@@ -80,9 +75,8 @@ const STEP_NAMES: Record<Step, string> = {
  name: trimmedName,
  ageRange,
  pace: paceId,
- disability,
  });
- }, [step, trimmedName, ageRange, paceId, disability]);
+ }, [step, trimmedName, ageRange, paceId]);
 
  const goToStep = (
  nextStep: Step,
@@ -131,7 +125,7 @@ const STEP_NAMES: Record<Step, string> = {
  const handlePaceSubmit = (event: FormEvent<HTMLFormElement>) => {
  event.preventDefault();
 
- goToStep("disability");
+ goToStep("done");
  };
 
  const handleFinalPreview = () => {
@@ -143,18 +137,6 @@ const STEP_NAMES: Record<Step, string> = {
  // The browser voice is the reply voice, so the preview is the same engine
  // and tone the dashboard will use — no server synthesis, no fallback.
  playName(trimmedName, selectedPace.id, "final");
- };
-
- const handleDisabilitySelect = (id: Disability) => {
- setDisability(id);
- };
-
- const handleDisabilitySubmit = (event: FormEvent<HTMLFormElement>) => {
- event.preventDefault();
-
- if (!disability) return;
-
- goToStep("done");
  };
 
  return (
@@ -169,25 +151,25 @@ const STEP_NAMES: Record<Step, string> = {
  Tell us about you.
  </h1>
  <p className="mt-3 max-w-[26rem] text-base leading-relaxed text-ink-muted">
- Five quick questions, one at a time. We use your answers to match your
- pace and tone.
+ Four quick steps, one at a time. We use your answers to match your pace
+ and tone.
  </p>
 
  <div className="mt-6">
  <p aria-live="polite" className="text-sm font-bold text-ink">
- Step {stepIndex} of 5: {STEP_NAMES[step]}
+ Step {stepIndex} of {STEP_COUNT}: {STEP_NAMES[step]}
  </p>
  <div
  role="progressbar"
  aria-label="Setup progress"
  aria-valuemin={1}
- aria-valuemax={5}
+ aria-valuemax={STEP_COUNT}
  aria-valuenow={stepIndex}
  className="mt-2 h-2 overflow-hidden rounded-full bg-line"
  >
  <div
  className="h-full rounded-full bg-sage-text transition-[width]"
- style={{ width: `${(stepIndex / 5) * 100}%` }}
+ style={{ width: `${(stepIndex / STEP_COUNT) * 100}%` }}
  />
  </div>
  </div>
@@ -238,28 +220,17 @@ const STEP_NAMES: Record<Step, string> = {
  />
  ) : null}
 
- {step === "disability" ? (
- <DisabilityStep
- headingRef={headingRef}
- disability={disability}
- onSelect={handleDisabilitySelect}
- onSubmit={handleDisabilitySubmit}
- onBack={() => goToStep("pace", "back")}
- />
- ) : null}
-
  {step === "done" ? (
  <DoneStep
  headingRef={headingRef}
  trimmedName={trimmedName}
- disabilityLabel={disabilityLabel}
  ageLabel={ageLabel}
  selectedPace={selectedPace}
  speakingId={speakingId}
  supported={supported}
  onFinalPreview={handleFinalPreview}
  onEdit={(nextStep) => goToStep(nextStep, "back")}
- onBack={() => goToStep("disability", "back")}
+ onBack={() => goToStep("pace", "back")}
  />
  ) : null}
  </div>

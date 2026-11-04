@@ -106,7 +106,6 @@ describe("profile injection", () => {
     const profiled = buildAtlasSystemPrompt(new Date("2026-03-05T12:00:00Z"), {
       name: "Sam",
       ageRange: "25-34",
-      disability: null,
     });
 
     expect(profiled).toContain("## Who you're talking to");
@@ -114,14 +113,13 @@ describe("profile injection", () => {
     expect(profiled).toContain("25–34");
   });
 
-  test("access need carries its guidance line", () => {
+  test("profile carries no access-need line", () => {
     const profiled = buildAtlasSystemPrompt(new Date("2026-03-05T12:00:00Z"), {
       name: "Sam",
       ageRange: null,
-      disability: "deaf",
     });
 
-    expect(profiled).toContain("- Access need: Deaf or hard of hearing.");
+    expect(profiled).not.toContain("Access need:");
   });
 });
 

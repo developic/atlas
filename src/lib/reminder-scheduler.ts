@@ -6,14 +6,13 @@
  * - the spoken topic waits until the orb is idle — no announcement ever talks
  *   over the conversation or the reply audio still playing.
  *
- * Channel choice follows onboarding: blind users hear the topic through the
- * browser voice, everyone else gets the beep (the future calm/sign modes read
- * the same source). A stored `reminder-mode` override wins over both.
+ * Channel choice follows the selected access mode: blind users hear the topic
+ * through the browser voice, everyone else gets the beep. A stored
+ * `reminder-mode` override wins over both.
  *
  * Everything external arrives through `SchedulerDeps`, so the offline suite
  * drives the tick with in-memory fakes and no timers.
  */
-import { loadOnboarding } from "./onboarding";
 import type { AccessMode } from "./access-modes";
 import {
   announceModeFor,
@@ -44,7 +43,7 @@ export type SchedulerDeps = {
   /**
    * The selected access mode. The application owns delivery: blind always
    * hears the topic, deaf and every other mode gets the beep. When absent,
-   * onboarding/override decide (existing behaviour).
+   * the stored override decides; otherwise the beep is the default.
    */
   mode?: AccessMode | null;
   listAll?: () => Promise<Reminder[]>;
@@ -99,8 +98,7 @@ export function settleAfterFire(reminder: Reminder, now: number): SettledReminde
 async function defaultGetMode(): Promise<AnnounceMode> {
   try {
     const override = await dbGetReminderMode();
-    const onboarding = await loadOnboarding();
-    return announceModeFor(onboarding?.disability ?? null, override ?? undefined);
+    return announceModeFor(override ?? undefined);
   } catch {
     return "beep";
   }

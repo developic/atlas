@@ -1,0 +1,10 @@
+# Atlas search Worker: one Exa-backed /search endpoint for the Atlas backend.
+# Secrets are never stored here. Set the Exa key once:
+#   cd worker && npx wrangler secret put EXA_API_KEY
+name = "atlas-search"
+main = "src/index.ts"
+compatibility_date = "2026-11-04"
+workers_dev = true
+
+# Only the production workers.dev URL; no per-version preview URLs.
+preview_urls = false

@@ -1,0 +1,4 @@
+# Local development only. Copy to `.dev.vars` and fill in the real key:
+#   cp .dev.vars.example .dev.vars
+# `.dev.vars` is ignored by git; never commit the real key.
+EXA_API_KEY=

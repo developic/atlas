@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 
 import { CardInteractionsProvider } from "@/components/dashboard/card-interactions";
+import { DashboardTour } from "@/components/dashboard/dashboard-tour";
 import { OrbCommandMenu, type OrbCommand } from "@/components/dashboard/orb-command-menu";
 import {
   mainLabelFor,
@@ -53,6 +54,7 @@ import {
   dbListMoods,
   dbPutMood,
 } from "@/lib/db/moods";
+import { loadTourComplete, saveTourComplete } from "@/lib/tour";
 import {
   buildSampleMoods,
   isSampleMoodEntry,
@@ -63,6 +65,9 @@ import { ParticlesOrb } from "@/registry/orbe/particles-orb/particles-orb";
 
 /** Leave the speaker tail behind before listening again. */
 const POST_REPLY_ARM_DELAY = 900;
+
+/** Let the first dashboard layout settle before the tour points at it. */
+const TOUR_AUTO_OPEN_DELAY = 600;
 
 const PREVIEWS: { value: OrbPreview; label: string }[] = [
   { value: "auto", label: "Follow the session" },
@@ -99,8 +104,11 @@ export function DashboardFlow() {
   const [openCardId, setOpenCardId] = useState<string | null>(null);
   const [debugOpen, setDebugOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [tourOpen, setTourOpen] = useState(false);
   const [accessMode, setAccessMode] = useState<AccessMode>("autism");
   const [voiceReplies, setVoiceReplies] = useState(false);
+  const tourCheckedRef = useRef(false);
+  const tourMountedRef = useRef(false);
 
   const capabilities = capabilitiesFor(accessMode);
   const speechEnabled = isSpeechEnabled(accessMode, voiceReplies);
@@ -477,6 +485,11 @@ export function DashboardFlow() {
 
   const closeDebug = useCallback(() => setDebugOpen(false), []);
 
+  const closeTour = useCallback(() => {
+    setTourOpen(false);
+    void saveTourComplete();
+  }, []);
+
   // The model asked for the camera but it never opened: tell the model in a
   // follow-up turn so it speaks the denial ("no permission — please allow
   // camera permission") instead of leaving the user hanging. Runs once per
@@ -539,6 +552,39 @@ export function DashboardFlow() {
       cancelled = true;
     };
   }, [storeThreads]);
+
+  // One-time dashboard tour: wait for hydration so every highlighted control
+  // exists, then open once. The marker is versioned in prefs; closing the tour
+  // (finish, skip, or Escape) writes it, so the next visit stays quiet.
+  // The mounted ref keeps the StrictMode remount from cancelling the check:
+  // the ref guard means the second mount does not schedule a second load.
+  useEffect(() => {
+    tourMountedRef.current = true;
+
+    return () => {
+      tourMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated || tourCheckedRef.current) return;
+
+    tourCheckedRef.current = true;
+
+    let timer = 0;
+
+    void loadTourComplete().then((complete) => {
+      if (complete) return;
+
+      timer = window.setTimeout(() => {
+        if (tourMountedRef.current) setTourOpen(true);
+      }, TOUR_AUTO_OPEN_DELAY);
+    });
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [hydrated]);
 
   const live = status === "live";
   const unavailable = status === "unsupported";
@@ -948,6 +994,7 @@ export function DashboardFlow() {
     { label: mainLabel, run: handleMain, active: live },
     { label: signCameraLabel, run: toggleCamera, active: signStatus === "live" },
     { label: "New chat", run: startThread, active: false },
+    { label: "Replay tutorial", run: () => setTourOpen(true), active: false },
     ...(accessMode === "autism" && sampleMoodsLoaded
       ? [
           {
@@ -999,6 +1046,7 @@ export function DashboardFlow() {
       ref={orbRef}
       role="button"
       tabIndex={0}
+      data-tour="orb"
       aria-label={orbActionLabel}
       title={orbActionLabel}
       onClick={onOrbActivate}
@@ -1104,7 +1152,10 @@ export function DashboardFlow() {
         />
         {/* Camera + Sign controls sit above the orb: the pointer path down to
             the chatbox no longer crosses these hover-active buttons. */}
-        <div className="mb-4 flex w-full max-w-md flex-col items-center gap-3">
+        <div
+          data-tour="camera-controls"
+          className="mb-4 flex w-full max-w-md flex-col items-center gap-3"
+        >
           <div className="flex flex-wrap items-center justify-center gap-3">
             <button
               type="button"
@@ -1153,6 +1204,7 @@ export function DashboardFlow() {
         </div>
         <button
           type="button"
+          data-tour="threads"
           onClick={() => setSidebarOpen((current) => !current)}
           aria-expanded={sidebarOpen}
           aria-pressed={sidebarOpen}
@@ -1240,6 +1292,10 @@ export function DashboardFlow() {
 
         {capabilities.chatbox ? (
           <Chatbox onSendText={sendTextWithMedia} />
+        ) : null}
+
+        {tourOpen ? (
+          <DashboardTour mode={accessMode} onClose={closeTour} />
         ) : null}
 
         <TurnDebugPanel

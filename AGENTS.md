@@ -18,7 +18,7 @@ Stack: Next.js App Router, React 19, TypeScript `strict`, Bun runtime, Tailwind 
 
 1. **Worktree hygiene.** The tree carries large uncommitted WIP that is not yours. Never `git add`/`reset`/`checkout`/`restore` anything wholesale; never stage, revert, or discard files you did not author this session. Commit security exists entirely in the repo owner's hands.
 2. **Log behavior changes.** Every change that alters behavior adds one entry to `context.md`, newest first, header `## YYYY-MM-DD HH:MM IST (HH:MM UTC) — <topic>`. State the decision and its tradeoff plainly; historical entries are never rewritten.
-3. **Never expose secrets.** All API keys (`MODEL_API_KEY`, `EXA_API_KEY`) live in `.env`, are read in `process.env` only inside server-only modules, and are never sent to the client or logged.
+3. **Never expose secrets.** All API keys (`MODEL_API_KEY`) live in `.env`, are read in `process.env` only inside server-only modules, and are never sent to the client or logged.
 4. **Read before edit.** Follow surrounding naming and style; keep public contracts (`TurnEvent`, `ChatMessage`, `CardContent`, orb state enums) stable unless a change is genuinely necessary — they cross the NDJSON wire and client storage.
 5. **TypeScript is strict; tests are plain `.js`.** `bun:test` has no type declarations in this repo, so test files must be `.js` without TS annotations — a `.test.ts` fails `tsc`.
 
@@ -87,7 +87,7 @@ src/lib/
   turn-stream.ts          TurnEvent union + fetchTurnStream reader (busy retries, TurnStreamError codes)
   orb-errors.ts           typed error codes (busy/timeout/invalid_json/no_reply/audio/tts/config) + one user-message map
   json-extract.ts / json-stream.ts   balanced JSON scanner | incremental stream reader (transcript/speak fields)
-  source-links.ts         citation extraction + Exa hit matching (URL normalization)
+  source-links.ts         citation extraction + search hit matching (URL normalization)
   tool-trace.ts / turn-debug.ts      tool rows for the reply | AI-wire panel types (client-safe)
   timer.ts / retry.ts     pure countdown FSM | pure retry helper (Retry-After + jitter)
   sign-video.ts           signed video → Muse Spark via the shared `muse-video` transport, strict structured-output contract
@@ -103,6 +103,8 @@ src/lib/
   tools/frame.ts          camera frame tool: authorizes a client capture; camera-off fails with a permission instruction
   db/reminders.ts         reminder rows on IndexedDB (v2 store) + channel override pref, degrade-not-throw
   db/moods.ts             private mood log rows on IndexedDB (v3 store), degrade-not-throw
+  tour.ts                 one-time dashboard tour marker (versioned pref, degrade-not-throw)
+  tour-position.ts        pure tour-card placement: below/above/side, viewport clamps, edge fallback
   camera-clip.ts          browser-only MP4 recorder shared by the frame tool and the obstacle guard
 ```
 
@@ -119,6 +121,7 @@ src/components/
                           interactive-markdown.tsx), chatbox with attachments
                           (attach-file, chatbox.tsx), AI-wire panel (turn-debug-panel),
                           Ctrl+K command menu, access mode bar (access-bar),
+                          one-time spotlight tour (dashboard-tour),
                           camera gestures (use-camera-gestures), frame capture
                           (use-frame-capture), blind obstacle guard (use-vision-guard)
   layout/                 header (wheelchair + blind SVGs live in components/characters.tsx),
@@ -144,7 +147,7 @@ src/lib/media-frames.ts   data-URL frame parsing (server side of the same contra
 5. **Contracts over duplicates.** One system of record per concept (card caps in `cards.ts`, widget caps in `interactive-markdown.ts`, theme tokens in `globals.css` + `lib/theme.ts`, browser-voice tone in `browser-voice.ts`). Shared checks live in one module and are imported (e.g. `looksLikeToolCall` is exported from `speech-integrity.ts` and reused, not re-implemented, in `model.ts`).
 6. **Degradation.** Persistence helpers return success/failure flags instead of throwing; user-facing errors come from the single user-message map; a tool failure can never kill a turn.
 7. **Validation policy.** All caps live as named constants (never inline magic numbers); validators return `ok | { ok: false, reason }` in model-readable language; unknown data is rejected, not coerced (e.g. the parser never "repairs" truncated JSON).
-8. **No secret stringing of endpoints.** One module owns a provider's request shape (Meta Model API in `meta-client.ts`, Exa, and no others); all fetches take `AbortSignal` and client disconnects must cancel downstream work.
+8. **No secret stringing of endpoints.** One module owns a provider's request shape (Meta Model API in `meta-client.ts`, the search endpoint in `websearch.ts`, and no others); all fetches take `AbortSignal` and client disconnects must cancel downstream work.
 
 ## Naming rules
 
@@ -183,6 +186,6 @@ src/lib/media-frames.ts   data-URL frame parsing (server side of the same contra
 
 ## Environment
 
-- `.env`: `MODEL_API_KEY`, `EXA_API_KEY` (all server-side; the browser only ever speaks the reply text).
+- `.env`: `MODEL_API_KEY`, optional `SEARCH_API_URL` override (all server-side; the browser only ever speaks the reply text).
 - Dev-only flags: `ATLAS_DEBUG_TURNS=1` (attach provider debug frames in production), `HARNESS_APP`, `EVAL_OUT_DIR` (harness).
 - `NODE_ENV !== production` enables the turn debug wire by default.

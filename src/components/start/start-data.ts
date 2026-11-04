@@ -14,16 +14,6 @@ export const AGE_RANGES = [
   { value: "65-plus", label: "65+" },
 ] as const;
 
-export const DISABILITIES = [
-  { value: "blind", label: "Blind or low vision", helper: "Vision" },
-  { value: "deaf", label: "Deaf or hard of hearing", helper: "Signs" },
-  { value: "mute", label: "Non-speaking", helper: "Signs" },
-  { value: "autism", label: "Autistic", helper: "Calm" },
-  { value: "mobility", label: "Mobility", helper: "Calm" },
-  { value: "other", label: "Something else", helper: "Calm" },
-  { value: "prefer-not-to-say", label: "Prefer not to say", helper: "Calm" },
-] as const;
-
 // The browser voice speaks at these rates (see `lib/browser-voice.ts`),
 // so the onboarding preview is the same tone the reply uses.
 export const PACES = [
@@ -45,17 +35,17 @@ export const PACES = [
 ] as const;
 
 export type AgeRange = (typeof AGE_RANGES)[number]["value"];
-export type Disability = (typeof DISABILITIES)[number]["value"];
 export type Pace = (typeof PACES)[number];
 export type PaceId = Pace["id"];
 
-export type Step = "name" | "age" | "pace" | "disability" | "done";
+export type Step = "name" | "age" | "pace" | "done";
 export type StepDirection = "forward" | "back";
+
+export const STEP_COUNT = 4;
 
 export const STEP_INDEX: Record<Step, number> = {
   name: 1,
   age: 2,
   pace: 3,
-  disability: 4,
-  done: 5,
+  done: 4,
 };

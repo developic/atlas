@@ -730,17 +730,13 @@ export function formatInZone(fireAt: number, timeZone?: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Announcement channel: voice for blind users, a short beep for everyone
-// else. The onboarding disability catalog already carries this split, so the
-// future vision/calm/sign modes read the same source.
+// Announcement channel: the dashboard's access mode decides voice delivery
+// (blind hears the topic; every other mode gets the beep). A stored override
+// wins over that default.
 // ---------------------------------------------------------------------------
 
-export function announceModeFor(
-  disability: string | null | undefined,
-  override?: AnnounceMode,
-): AnnounceMode {
-  if (override === "voice" || override === "beep") return override;
-  return disability === "blind" ? "voice" : "beep";
+export function announceModeFor(override?: AnnounceMode): AnnounceMode {
+  return override === "voice" || override === "beep" ? override : "beep";
 }
 
 /** The topic line a blind user's announcement speaks — the title, nothing else. */
